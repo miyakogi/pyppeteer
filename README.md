@@ -106,7 +106,7 @@ title = await element.evaluate('(element) => element.textContent')
 Credits
 ---------
 
-This package was created with Cookiecutter_ and the `audreyr/cookiecutter-pypackage`_ project template.
+This package was created with [Cookiecutter][cookiecutter] and the [`audreyr/cookiecutter-pypackage`][cookiecutter-pypackage] project template.
 
-.. _Cookiecutter: https://github.com/audreyr/cookiecutter
-.. _`audreyr/cookiecutter-pypackage`: https://github.com/audreyr/cookiecutter-pypackage
+[cookiecutter]: https://github.com/audreyr/cookiecutter
+[cookiecutter-pypackage]: https://github.com/audreyr/cookiecutter-pypackage
