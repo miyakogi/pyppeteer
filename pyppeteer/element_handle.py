@@ -140,3 +140,19 @@ element => {
         x = center.get('x', 0)
         y = center.get('y', 0)
         await self._touchscreen.tap(x, y)
+
+    async def boundingBox(self) -> dict:
+        result = await self._client.send('DOM.getBoxModel', {
+            'objectId': self._remoteObject['objectId']
+        })
+
+        if not result:
+            return None
+
+        quad = result['model']['border']
+        x = min(quad[0], quad[2], quad[4], quad[6])
+        y = min(quad[1], quad[3], quad[5], quad[7])
+        width = max(quad[0], quad[2], quad[4], quad[6]) - x
+        height = max(quad[1], quad[3], quad[5], quad[7]) - y
+
+        return dict(x=x, y=y, width=width, height=height)
