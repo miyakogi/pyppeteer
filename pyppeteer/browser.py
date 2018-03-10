@@ -108,6 +108,23 @@ class Browser(EventEmitter):
             raise BrowserError('Failed to create page.')
         return page
 
+    async def newIncognitoPage(self) -> Page:
+        """Make new page on this browser and return its object."""
+        browserContextId = (await self._connection.send(
+            'Target.createBrowserContext', {})).get('browserContextId')
+        targetId = (await self._connection.send(
+            'Target.createTarget',
+            {'url': 'about:blank', 'browserContextId': browserContextId})).get('targetId')
+        target = self._targets.get(targetId)
+        if target is None:
+            raise BrowserError('Failed to create target for page.')
+        if not await target._initializedPromise:
+            raise BrowserError('Failed to create target for page.')
+        page = await target.page()
+        if page is None:
+            raise BrowserError('Failed to create page.')
+        return page
+
     def targets(self) -> List['Target']:
         """Get all targets of this browser."""
         return [target for target in self._targets.values()
