@@ -109,7 +109,7 @@ class Browser(EventEmitter):
         return page
 
     async def newIncognitoPage(self) -> Page:
-        """Make new page on this browser and return its object."""
+        """Make new Incognito page on this browser and return its object."""
         browserContextId = (await self._connection.send(
             'Target.createBrowserContext', {})).get('browserContextId')
         targetId = (await self._connection.send(
@@ -123,7 +123,7 @@ class Browser(EventEmitter):
         page = await target.page()
         if page is None:
             raise BrowserError('Failed to create page.')
-        return page
+        return page, browserContextId
 
     def targets(self) -> List['Target']:
         """Get all targets of this browser."""
