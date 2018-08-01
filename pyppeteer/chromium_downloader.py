@@ -63,7 +63,7 @@ def get_download_url(base_download_host) -> (dict, dict):
     return downloadURLs
 
 
-def def get_url(base_download_host) -> str:
+def get_url(base_download_host) -> str:
     """Get chromium download url."""
     downloadURLs = get_download_url(base_download_host)
     return downloadURLs[current_platform()]
