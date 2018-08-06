@@ -20,19 +20,12 @@ logger = logging.getLogger(__name__)
 
 DOWNLOADS_FOLDER = Path(__pyppeteer_home__) / 'local-chromium'
 DEFAULT_DOWNLOAD_HOST = 'https://storage.googleapis.com'
+ALTERNATIVE_DOWNLOAD_HOST = 'https://npm.taobao.org/mirrors'
 DOWNLOAD_HOST = os.environ.get(
     'PYPPETEER_DOWNLOAD_HOST', DEFAULT_DOWNLOAD_HOST)
-BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
 
 REVISION = os.environ.get(
     'PYPPETEER_CHROMIUM_REVISION', __chromimum_revision__)
-
-downloadURLs = {
-    'linux': f'{BASE_URL}/Linux_x64/{REVISION}/chrome-linux.zip',
-    'mac': f'{BASE_URL}/Mac/{REVISION}/chrome-mac.zip',
-    'win32': f'{BASE_URL}/Win/{REVISION}/chrome-win32.zip',
-    'win64': f'{BASE_URL}/Win_x64/{REVISION}/chrome-win32.zip',
-}
 
 chromiumExecutable = {
     'linux': DOWNLOADS_FOLDER / REVISION / 'chrome-linux' / 'chrome',
@@ -41,7 +34,6 @@ chromiumExecutable = {
     'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
     'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
 }
-
 
 def current_platform() -> str:
     """Get current platform name by short string."""
@@ -58,8 +50,22 @@ def current_platform() -> str:
     raise OSError('Unsupported platform: ' + sys.platform)
 
 
-def get_url() -> str:
+def get_download_url(base_download_host) -> (dict, dict):
+    DOWNLOAD_HOST = os.environ.get(
+        'PYPPETEER_DOWNLOAD_HOST', base_download_host)
+    BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
+    downloadURLs = {
+        'linux': f'{BASE_URL}/Linux_x64/{REVISION}/chrome-linux.zip',
+        'mac': f'{BASE_URL}/Mac/{REVISION}/chrome-mac.zip',
+        'win32': f'{BASE_URL}/Win/{REVISION}/chrome-win32.zip',
+        'win64': f'{BASE_URL}/Win_x64/{REVISION}/chrome-win32.zip',
+    }
+    return downloadURLs
+
+
+def get_url(base_download_host) -> str:
     """Get chromium download url."""
+    downloadURLs = get_download_url(base_download_host)
     return downloadURLs[current_platform()]
 
 
@@ -124,7 +130,14 @@ def extract_zip(data: BytesIO, path: Path) -> None:
 
 def download_chromium() -> None:
     """Downlaod and extract chrmoium."""
-    extract_zip(download_zip(get_url()), DOWNLOADS_FOLDER / REVISION)
+    try:
+        zipped = download_zip(get_url(DEFAULT_DOWNLOAD_HOST))
+    except Exception as e:
+        print('Default mirror URL is invalid!\n'
+              'Switching to alternative mirror.')
+        zipped = download_zip(get_url(ALTERNATIVE_DOWNLOAD_HOST))
+    finally:
+        extract_zip(zipped, DOWNLOADS_FOLDER / REVISION)
 
 
 def chromium_excutable() -> Path:
