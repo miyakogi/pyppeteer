@@ -882,11 +882,14 @@ class WaitTask(object):
             if success:
                 await success.dispose()
             return
-
-        if not error and success and (
-                await self._frame.evaluate('s => !s', success)):
-            await success.dispose()
-            return
+        
+        try:
+            if not error and success and (
+                    await self._frame.evaluate('s => !s', success)):
+                await success.dispose()
+                return
+        except pyppeteer.errors.NetworkError:
+                await success.dispose()
 
         # page is navigated and context is destroyed.
         # Try again in the new execution context.
