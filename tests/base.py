@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import unittest
+import logging
 
 from syncer import sync
 
@@ -10,7 +11,7 @@ from pyppeteer.util import get_free_port
 
 from .server import get_application
 
-DEFAULT_OPTIONS = {'args': ['--no-sandbox']}
+DEFAULT_OPTIONS = {'args': ['--no-sandbox'], 'executablePath': '/usr/local/chrome/chrome'}
 
 
 class BaseTestCase(unittest.TestCase):
