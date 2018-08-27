@@ -90,5 +90,5 @@ setup(
     python_requires='>=3.5',
     test_suite='tests',
     tests_require=test_requirements,
-    **extra_args,
+    **extra_args
 )
