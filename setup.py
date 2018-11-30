@@ -43,7 +43,7 @@ except ImportError:
 
 requirements = [
     'pyee',
-    'websockets',
+    'websockets==6.0',
     'appdirs',
     'urllib3',
     'tqdm'
