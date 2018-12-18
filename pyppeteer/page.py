@@ -846,7 +846,7 @@ function addPageBinding(bindingName) {
         * then main resource failed to load
 
         .. note::
-            :meth:`goto` either raise error or return a main resource response.
+            :meth:`goto` return a main resource response.
             The only exceptions are navigation to ``about:blank`` or navigation
             to the same URL with a different hash, which would succeed and
             return ``None``.
