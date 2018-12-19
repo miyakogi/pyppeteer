@@ -491,7 +491,7 @@ class Page(EventEmitter):
         * ``sameSite`` (str): ``'Strict'`` or ``'Lax'``
         """
         if not urls:
-            urls = (self.url, )
+            urls = (self.url,)
         resp = await self._client.send('Network.getCookies', {
             'urls': urls,
         })
@@ -882,6 +882,10 @@ function addPageBinding(bindingName) {
         result = await watcher.navigationPromise()
         watcher.cancel()
         helper.removeEventListeners(eventListeners)
+        error = result[0].pop().exception()  # type: ignore
+        if error:
+            if not isinstance(error, TimeoutError):
+                raise error
 
         request = requests.get(mainFrame._navigationURL)
         return request.response if request else None
@@ -1728,7 +1732,6 @@ supportedMetrics = (
     'JSHeapUsedSize',
     'JSHeapTotalSize',
 )
-
 
 unitToPixels = {
     'px': 1,
