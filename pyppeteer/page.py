@@ -22,6 +22,7 @@ from pyppeteer.dialog import Dialog
 from pyppeteer.element_handle import ElementHandle
 from pyppeteer.emulation_manager import EmulationManager
 from pyppeteer.errors import PageError
+from pyppeteer.errors import TimeoutError as pyTimeoutError
 from pyppeteer.execution_context import JSHandle  # noqa: F401
 from pyppeteer.frame_manager import Frame  # noqa: F401
 from pyppeteer.frame_manager import FrameManager
@@ -877,14 +878,14 @@ function addPageBinding(bindingName) {
                                    options)
 
         result = await self._navigate(url, referrer)
-        if result is not None:
+        if not result is None:
             raise PageError(result)
         result = await watcher.navigationPromise()
         watcher.cancel()
         helper.removeEventListeners(eventListeners)
         error = result[0].pop().exception()  # type: ignore
         if error:
-            if not isinstance(error, TimeoutError):
+            if not isinstance(error, pyTimeoutError):
                 raise error
 
         request = requests.get(mainFrame._navigationURL)
@@ -895,6 +896,8 @@ function addPageBinding(bindingName) {
             'Page.navigate', {'url': url, 'referrer': referrer})
         if response.get('errorText'):
             return f'{response["errorText"]} at {url}'
+        if response.get('error_text'):
+            return f'{response["error_text"]} at {url}'
         return None
 
     async def reload(self, options: dict = None, **kwargs: Any
