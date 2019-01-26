@@ -13,6 +13,7 @@ from zipfile import ZipFile
 
 import urllib3
 from tqdm import tqdm
+import certifi
 
 from pyppeteer import __chromium_revision__, __pyppeteer_home__
 
@@ -31,19 +32,20 @@ NO_PROGRESS_BAR = os.environ.get('PYPPETEER_NO_PROGRESS_BAR', '')
 if NO_PROGRESS_BAR.lower() in ('1', 'true'):
     NO_PROGRESS_BAR = True  # type: ignore
 
+win_postf = "win" if int(REVISION) > 591479 else "win32"
 downloadURLs = {
     'linux': f'{BASE_URL}/Linux_x64/{REVISION}/chrome-linux.zip',
     'mac': f'{BASE_URL}/Mac/{REVISION}/chrome-mac.zip',
-    'win32': f'{BASE_URL}/Win/{REVISION}/chrome-win32.zip',
-    'win64': f'{BASE_URL}/Win_x64/{REVISION}/chrome-win32.zip',
+    'win32': f'{BASE_URL}/Win/{REVISION}/chrome-{win_postf}.zip',
+    'win64': f'{BASE_URL}/Win_x64/{REVISION}/chrome-{win_postf}.zip',
 }
 
 chromiumExecutable = {
     'linux': DOWNLOADS_FOLDER / REVISION / 'chrome-linux' / 'chrome',
     'mac': (DOWNLOADS_FOLDER / REVISION / 'chrome-mac' / 'Chromium.app' /
             'Contents' / 'MacOS' / 'Chromium'),
-    'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
-    'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
+    'win32': DOWNLOADS_FOLDER / REVISION / f'chrome-{win_postf}' / 'chrome.exe',
+    'win64': DOWNLOADS_FOLDER / REVISION / f'chrome-{win_postf}' / 'chrome.exe',
 }
 
 
@@ -69,17 +71,14 @@ def get_url() -> str:
 
 def download_zip(url: str) -> BytesIO:
     """Download data from url."""
-    logger.warning('start chromium download.\n'
+    logger.warning('start secure https chromium download.\n'
                    'Download may take a few minutes.')
 
-    # disable warnings so that we don't need a cert.
-    # see https://urllib3.readthedocs.io/en/latest/advanced-usage.html for more
-    urllib3.disable_warnings()
-
-    with urllib3.PoolManager() as http:
+    with urllib3.PoolManager(cert_reqs='CERT_REQUIRED',
+                             ca_certs=certifi.where()) as https:
         # Get data from url.
         # set preload_content=False means using stream later.
-        data = http.request('GET', url, preload_content=False)
+        data = https.request('GET', url, preload_content=False)
 
         try:
             total_length = int(data.headers['content-length'])
