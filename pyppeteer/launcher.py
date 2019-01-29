@@ -171,7 +171,7 @@ class Launcher(object):
                 signal.signal(signal.SIGHUP, _close_process)
 
         connectionDelay = self.slowMo
-        self.browserWSEndpoint = self._get_ws_endpoint()
+        self.browserWSEndpoint = get_ws_endpoint(self.url)
         logger.info(f'Browser listening on: {self.browserWSEndpoint}')
         self.connection = Connection(
             self.browserWSEndpoint,
@@ -203,24 +203,6 @@ class Launcher(object):
         await initialPagePromise
         removeEventListeners(listeners)
 
-    def _get_ws_endpoint(self) -> str:
-        url = self.url + '/json/version'
-        while self.proc.poll() is None:
-            time.sleep(0.1)
-            try:
-                with urlopen(url) as f:
-                    data = json.loads(f.read().decode())
-                break
-            except URLError as e:
-                continue
-        else:
-            raise BrowserError(
-                'Browser closed unexpectedly:\n{}'.format(
-                    self.proc.stdout.read().decode()
-                )
-            )
-        return data['webSocketDebuggerUrl']
-
     def waitForChromeToClose(self) -> None:
         """Terminate chrome."""
         if self.proc.poll() is None and not self.chromeClosed:
@@ -246,6 +228,23 @@ class Launcher(object):
             # Force kill chrome only when using temporary userDataDir
             self.waitForChromeToClose()
             self._cleanup_tmp_user_data_dir()
+
+
+def get_ws_endpoint(url) -> str:
+    url = url + '/json/version'
+    timeout = time.time() + 30
+    while(True):
+        if time.time() > timeout:
+            raise BrowserError('Browser closed unexpectedly:\n')
+        try:
+            with urlopen(url) as f:
+                data = json.loads(f.read().decode())
+            break
+        except URLError as e:
+            continue
+        time.sleep(0.1)
+
+    return data['webSocketDebuggerUrl']
 
 
 async def launch(options: dict = None, **kwargs: Any) -> Browser:
@@ -329,18 +328,19 @@ async def launch(options: dict = None, **kwargs: Any) -> Browser:
     """
     return await Launcher(options, **kwargs).launch()
 
-
 async def connect(options: dict = None, **kwargs: Any) -> Browser:
     """Connect to the existing chrome.
 
-    ``browserWSEndpoint`` option is necessary to connect to the chrome. The
-    format is ``ws://${host}:${port}/devtools/browser/<id>``. This value can
-    get by :attr:`~pyppeteer.browser.Browser.wsEndpoint`.
+    ``browserWSEndpoint`` or ``browserURL`` option is necessary to connect to
+    the chrome. The format of ``browserWSEndpoint`` is
+    ``ws://${host}:${port}/devtools/browser/<id>`` and format of ``browserURL``
+    is ``http://127.0.0.1:9222```.
+    The value of ``browserWSEndpoint`` can get by :attr:`~pyppeteer.browser.Browser.wsEndpoint`.
 
     Available options are:
 
     * ``browserWSEndpoint`` (str): A browser websocket endpoint to connect to.
-      (**required**)
+    * ``browserURL`` (str): A browser URL to connect to.
     * ``ignoreHTTPSErrors`` (bool): Whether to ignore HTTPS errors. Defaults to
       ``False``.
     * ``defaultViewport`` (dict): Set a consistent viewport for each page.
@@ -370,7 +370,10 @@ async def connect(options: dict = None, **kwargs: Any) -> Browser:
 
     browserWSEndpoint = options.get('browserWSEndpoint')
     if not browserWSEndpoint:
-        raise BrowserError('Need `browserWSEndpoint` option.')
+        browserURL= options.get('browserURL')
+        if not browserURL:
+            raise BrowserError('Need `browserWSEndpoint` or `browserURL` option.')
+        browserWSEndpoint = get_ws_endpoint(browserURL)
     connectionDelay = options.get('slowMo', 0)
     connection = Connection(browserWSEndpoint,
                             options.get('loop', asyncio.get_event_loop()),
