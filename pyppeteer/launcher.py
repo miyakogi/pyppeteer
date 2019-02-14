@@ -125,6 +125,8 @@ class Launcher(object):
             self.chromeExecutable = str(chromium_executable())
 
         self.cmd = [self.chromeExecutable] + self.chromeArguments
+        if options.get('dumb_init', False):
+            self.cmd.insert(0, 'dumb-init')
 
     def _cleanup_tmp_user_data_dir(self) -> None:
         for retry in range(100):
