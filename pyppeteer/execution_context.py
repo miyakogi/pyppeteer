@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Execut Context Module."""
+"""Execution Context Module."""
 
+import logging
 import math
+import re
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from pyppeteer import helper
 from pyppeteer.connection import CDPSession
 from pyppeteer.errors import ElementHandleError, NetworkError
+from pyppeteer.helper import debugError
 
 if TYPE_CHECKING:
     from pyppeteer.element_handle import ElementHandle  # noqa: F401
     from pyppeteer.frame_manager import Frame  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+EVALUATION_SCRIPT_URL = '__pyppeteer_evaluation_script__'
+SOURCE_URL_REGEX = re.compile(
+    r'^[\040\t]*//[@#] sourceURL=\s*(\S*?)\s*$',
+    re.MULTILINE,
+)
 
 
 class ExecutionContext(object):
     """Execution Context class."""
 
     def __init__(self, client: CDPSession, contextPayload: Dict,
-                 objectHandleFactory: Any, frame: Optional['Frame']) -> None:
+                 objectHandleFactory: Any, frame: 'Frame' = None) -> None:
         self._client = client
         self._frame = frame
         self._contextId = contextPayload.get('id')
@@ -53,19 +64,30 @@ class ExecutionContext(object):
         await handle.dispose()
         return result
 
-    async def evaluateHandle(self, pageFunction: str, *args: Any,
+    async def evaluateHandle(self, pageFunction: str, *args: Any,  # noqa: C901
                              force_expr: bool = False) -> 'JSHandle':
         """Execute ``pageFunction`` on this context.
 
         Details see :meth:`pyppeteer.page.Page.evaluateHandle`.
         """
+        suffix = f'//# sourceURL={EVALUATION_SCRIPT_URL}'
+
         if force_expr or (not args and not helper.is_jsfunc(pageFunction)):
-            _obj = await self._client.send('Runtime.evaluate', {
-                'expression': pageFunction,
-                'contextId': self._contextId,
-                'returnByValue': False,
-                'awaitPromise': True,
-            })
+            try:
+                if SOURCE_URL_REGEX.match(pageFunction):
+                    expressionWithSourceUrl = pageFunction
+                else:
+                    expressionWithSourceUrl = f'{pageFunction}\n{suffix}'
+                _obj = await self._client.send('Runtime.evaluate', {
+                    'expression': expressionWithSourceUrl,
+                    'contextId': self._contextId,
+                    'returnByValue': False,
+                    'awaitPromise': True,
+                    'userGesture': True,
+                })
+            except Exception as e:
+                _rewriteError(e)
+
             exceptionDetails = _obj.get('exceptionDetails')
             if exceptionDetails:
                 raise ElementHandleError(
@@ -74,13 +96,18 @@ class ExecutionContext(object):
             remoteObject = _obj.get('result')
             return self._objectHandleFactory(remoteObject)
 
-        _obj = await self._client.send('Runtime.callFunctionOn', {
-            'functionDeclaration': pageFunction,
-            'executionContextId': self._contextId,
-            'arguments': [self._convertArgument(arg) for arg in args],
-            'returnByValue': False,
-            'awaitPromise': True,
-        })
+        try:
+            _obj = await self._client.send('Runtime.callFunctionOn', {
+                'functionDeclaration': f'{pageFunction}\n{suffix}\n',
+                'executionContextId': self._contextId,
+                'arguments': [self._convertArgument(arg) for arg in args],
+                'returnByValue': False,
+                'awaitPromise': True,
+                'userGesture': True,
+            })
+        except Exception as e:
+            _rewriteError(e)
+
         exceptionDetails = _obj.get('exceptionDetails')
         if exceptionDetails:
             raise ElementHandleError('Evaluation failed: {}'.format(
@@ -190,7 +217,10 @@ class JSHandle(object):
         if self._disposed:
             return
         self._disposed = True
-        await helper.releaseObject(self._client, self._remoteObject)
+        try:
+            await helper.releaseObject(self._client, self._remoteObject)
+        except Exception as e:
+            debugError(logger, e)
 
     def toString(self) -> str:
         """Get string representation."""
@@ -200,3 +230,10 @@ class JSHandle(object):
             return f'JSHandle@{_type}'
         return 'JSHandle:{}'.format(
             helper.valueFromRemoteObject(self._remoteObject))
+
+
+def _rewriteError(error: Exception) -> None:
+    if error.args[0].endswith('Cannot find context with specified id'):
+        msg = 'Execution context was destroyed, most likely because of a navigation.'  # noqa: E501
+        raise type(error)(msg)
+    raise error

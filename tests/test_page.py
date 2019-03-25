@@ -52,7 +52,7 @@ class TestEvaluate(BaseTestCase):
                     setTimeout(() => resolve(1), 0);
                 }
         )}''')
-        self.assertIn('Protocol Error', cm.exception.args[0])
+        self.assertIn('Protocol error', cm.exception.args[0])
 
     @sync
     async def test_after_framenavigation(self):
@@ -86,10 +86,22 @@ class TestEvaluate(BaseTestCase):
         self.assertEqual(result, 27)
 
     @sync
-    async def test_paromise_reject(self):
+    async def test_promise_reject(self):
         with self.assertRaises(ElementHandleError) as cm:
             await self.page.evaluate('() => not.existing.object.property')
         self.assertIn('not is not defined', cm.exception.args[0])
+
+    @sync
+    async def test_string_as_error_message(self):
+        with self.assertRaises(Exception) as cm:
+            await self.page.evaluate('() => { throw "qwerty"; }')
+        self.assertIn('qwerty', cm.exception.args[0])
+
+    @sync
+    async def test_number_as_error_message(self):
+        with self.assertRaises(Exception) as cm:
+            await self.page.evaluate('() => { throw 100500; }')
+        self.assertIn('100500', cm.exception.args[0])
 
     @sync
     async def test_return_complex_object(self):
@@ -207,6 +219,29 @@ class TestEvaluate(BaseTestCase):
         aHandle = await self.page.evaluateHandle('() => 5')
         isFive = await self.page.evaluate('(e) => Object.is(e, 5)', aHandle)
         self.assertTrue(isFive)
+
+    @sync
+    async def test_simulate_user_gesture(self):
+        playAudio = '''function playAudio() {
+            const audio = document.createElement('audio');
+            audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+            return audio.play();
+        }'''  # noqa: E501
+        await self.page.evaluate(playAudio)
+        await self.page.evaluate('({})()'.format(playAudio), force_expr=True)
+
+    @sync
+    async def test_nice_error_after_navigation(self):
+        executionContext = await self.page.mainFrame.executionContext()
+
+        await asyncio.wait([
+            self.page.waitForNavigation(),
+            executionContext.evaluate('window.location.reload()'),
+        ])
+
+        with self.assertRaises(NetworkError) as cm:
+            await executionContext.evaluate('() => null')
+        self.assertIn('navigation', cm.exception.args[0])
 
 
 class TestOfflineMode(BaseTestCase):
@@ -336,6 +371,19 @@ console.log(Promise.resolve('should not wait until resolved!'));
         msg = messages[0]
         self.assertEqual(msg.text, 'JSHandle@object')
 
+    @sync
+    async def test_trigger_correct_log(self):
+        await self.page.goto('about:blank')
+        messages = []
+        self.page.on('console', lambda m: messages.append(m))
+        asyncio.ensure_future(self.page.evaluate(
+            'async url => fetch(url).catch(e => {})', self.url + 'empty'))
+        await waitEvent(self.page, 'console')
+        self.assertEqual(len(messages), 1)
+        message = messages[0]
+        self.assertIn('No \'Access-Control-Allow-Origin\'', message.text)
+        self.assertEqual(message.type, 'error')
+
 
 class TestDOMContentLoaded(BaseTestCase):
     @sync
@@ -396,6 +444,22 @@ class TestGoto(BaseTestCase):
         self.assertIsNone(response)
 
     @sync
+    async def test_response_when_page_changes_url(self):
+        response = await self.page.goto(self.url + 'static/historyapi.html')
+        self.assertTrue(response)
+        self.assertEqual(response.status, 200)
+
+    @sync
+    async def test_goto_subframe_204(self):
+        await self.page.goto(self.url + 'static/frame-204.html')
+
+    @sync
+    async def test_goto_fail_204(self):
+        with self.assertRaises(PageError) as cm:
+            await self.page.goto('http://httpstat.us/204')
+        self.assertIn('net::ERR_ABORTED', cm.exception.args[0])
+
+    @sync
     async def test_goto_documentloaded(self):
         import logging
         with self.assertLogs('pyppeteer', logging.WARNING):
@@ -407,6 +471,21 @@ class TestGoto(BaseTestCase):
     async def test_goto_domcontentloaded(self):
         response = await self.page.goto(self.url + 'empty',
                                         waitUntil='domcontentloaded')
+        self.assertEqual(response.status, 200)
+
+    @unittest.skip('This test should be fixed')
+    @sync
+    async def test_goto_history_api_beforeunload(self):
+        await self.page.goto(self.url + 'empty')
+        await self.page.evaluate('''() => {
+            window.addEventListener(
+                'beforeunload',
+                () => history.replaceState(null, 'initial', window.location.href),
+                false,
+            );
+        }''')  # noqa: E501
+        response = await self.page.goto(self.url + 'static/grid.html')
+        self.assertTrue(response)
         self.assertEqual(response.status, 200)
 
     @sync
@@ -535,11 +614,20 @@ class TestWaitForNavigation(BaseTestCase):
     async def test_click_anchor_link(self):
         await self.page.goto(self.url + 'empty')
         await self.page.setContent('<a href="#foobar">foobar</a>')
-        await asyncio.wait([
-            self.page.click('a'),
+        results = await asyncio.gather(
             self.page.waitForNavigation(),
-        ])
+            self.page.click('a'),
+        )
+        self.assertIsNone(results[0])
         self.assertEqual(self.page.url, self.url + 'empty#foobar')
+
+    @sync
+    async def test_return_nevigated_response_reload(self):
+        await self.page.goto(self.url + 'empty')
+        navPromise = asyncio.ensure_future(self.page.waitForNavigation())
+        await self.page.reload()
+        response = await navPromise
+        self.assertEqual(response.url, self.url + 'empty')
 
     @sync
     async def test_history_push_state(self):
@@ -550,10 +638,11 @@ class TestWaitForNavigation(BaseTestCase):
                 function pushState() { history.pushState({}, '', 'wow.html') }
             </script>
         ''')
-        await asyncio.wait([
-            self.page.click('a'),
+        results = await asyncio.gather(
             self.page.waitForNavigation(),
-        ])
+            self.page.click('a'),
+        )
+        self.assertIsNone(results[0])
         self.assertEqual(self.page.url, self.url + 'wow.html')
 
     @sync
@@ -567,10 +656,11 @@ class TestWaitForNavigation(BaseTestCase):
                 }
             </script>
         ''')
-        await asyncio.wait([
-            self.page.click('a'),
+        results = await asyncio.gather(
             self.page.waitForNavigation(),
-        ])
+            self.page.click('a'),
+        )
+        self.assertIsNone(results[0])
         self.assertEqual(self.page.url, self.url + 'replaced.html')
 
     @sync
@@ -587,19 +677,22 @@ class TestWaitForNavigation(BaseTestCase):
             </script>
         ''')
         self.assertEqual(self.page.url, self.url + 'second.html')
-        await asyncio.wait([
+        results_back = await asyncio.gather(
+            self.page.waitForNavigation(),
             self.page.click('a#back'),
-            self.page.waitForNavigation(),
-        ])
+        )
+        self.assertIsNone(results_back[0])
         self.assertEqual(self.page.url, self.url + 'first.html')
-        await asyncio.wait([
-            self.page.click('a#forward'),
+
+        results_forward = await asyncio.gather(
             self.page.waitForNavigation(),
-        ])
+            self.page.click('a#forward'),
+        )
+        self.assertIsNone(results_forward[0])
         self.assertEqual(self.page.url, self.url + 'second.html')
 
     @sync
-    async def test_subframe_issues(self) -> None:
+    async def test_subframe_issues(self):
         navigationPromise = asyncio.ensure_future(
             self.page.goto(self.url + 'static/one-frame.html'))
         frame = await waitEvent(self.page, 'frameattached')
@@ -612,6 +705,108 @@ class TestWaitForNavigation(BaseTestCase):
         self.page.on('framenavigated', is_same_frame)
         asyncio.ensure_future(frame.evaluate('window.stop()'))
         await navigationPromise
+
+
+class TestWaitForRequest(BaseTestCase):
+    @sync
+    async def test_wait_for_request(self):
+        await self.page.goto(self.url + 'empty')
+        results = await asyncio.gather(
+            self.page.waitForRequest(self.url + 'static/digits/2.png'),
+            self.page.evaluate('''() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }''')
+        )
+        request = results[0]
+        self.assertEqual(request.url, self.url + 'static/digits/2.png')
+
+    @sync
+    async def test_predicate(self):
+        await self.page.goto(self.url + 'empty')
+
+        def predicate(req):
+            return req.url == self.url + 'static/digits/2.png'
+
+        results = await asyncio.gather(
+            self.page.waitForRequest(predicate),
+            self.page.evaluate('''() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }''')
+        )
+        request = results[0]
+        self.assertEqual(request.url, self.url + 'static/digits/2.png')
+
+    @sync
+    async def test_no_timeout(self):
+        await self.page.goto(self.url + 'empty')
+        results = await asyncio.gather(
+            self.page.waitForRequest(
+                self.url + 'static/digits/2.png',
+                timeout=0,
+            ),
+            self.page.evaluate('''() => setTimeout(() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }, 50)''')
+        )
+        request = results[0]
+        self.assertEqual(request.url, self.url + 'static/digits/2.png')
+
+
+class TestWaitForResponse(BaseTestCase):
+    @sync
+    async def test_wait_for_response(self):
+        await self.page.goto(self.url + 'empty')
+        results = await asyncio.gather(
+            self.page.waitForResponse(self.url + 'static/digits/2.png'),
+            self.page.evaluate('''() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }''')
+        )
+        response = results[0]
+        self.assertEqual(response.url, self.url + 'static/digits/2.png')
+
+    @sync
+    async def test_predicate(self):
+        await self.page.goto(self.url + 'empty')
+
+        def predicate(response):
+            return response.url == self.url + 'static/digits/2.png'
+
+        results = await asyncio.gather(
+            self.page.waitForResponse(predicate),
+            self.page.evaluate('''() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }''')
+        )
+        response = results[0]
+        self.assertEqual(response.url, self.url + 'static/digits/2.png')
+
+    @sync
+    async def test_no_timeout(self):
+        await self.page.goto(self.url + 'empty')
+        results = await asyncio.gather(
+            self.page.waitForResponse(
+                self.url + 'static/digits/2.png',
+                timeout=0,
+            ),
+            self.page.evaluate('''() => setTimeout(() => {
+                fetch('/static/digits/1.png');
+                fetch('/static/digits/2.png');
+                fetch('/static/digits/3.png');
+            }, 50)''')
+        )
+        response = results[0]
+        self.assertEqual(response.url, self.url + 'static/digits/2.png')
 
 
 class TestGoBack(BaseTestCase):
@@ -648,7 +843,7 @@ class TestGoBack(BaseTestCase):
         self.assertEqual(self.page.url, self.url + 'first.html')
 
 
-class TestExposeFunctoin(BaseTestCase):
+class TestExposeFunction(BaseTestCase):
     @sync
     async def test_expose_function(self):
         await self.page.goto(self.url + 'empty')
@@ -671,7 +866,6 @@ class TestExposeFunctoin(BaseTestCase):
 
         await self.page.exposeFunction('compute', compute)
         result = await self.page.evaluate('() => compute(3, 5)')
-        print(result)
         self.assertEqual(result, 15)
 
     @sync
@@ -689,256 +883,6 @@ class TestExposeFunctoin(BaseTestCase):
         frame = self.page.frames[1]
         result = await frame.evaluate('() => compute(3, 5)')
         self.assertEqual(result, 15)
-
-
-class TestRequestInterception(BaseTestCase):
-    @sync
-    async def test_request_interception(self):
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            self.assertIn('empty', req.url)
-            self.assertTrue(req.headers.get('user-agent'))
-            self.assertEqual(req.method, 'GET')
-            self.assertIsNone(req.postData)
-            self.assertEqual(req.resourceType, 'document')
-            self.assertEqual(req.frame, self.page.mainFrame)
-            self.assertEqual(req.frame.url, 'about:blank')
-            await req.continue_()
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        res = await self.page.goto(self.url + 'empty')
-        self.assertEqual(res.status, 200)
-
-    @sync
-    async def test_request_interception_stop(self):
-        await self.page.setRequestInterception(True)
-        self.page.once('request',
-                       lambda req: asyncio.ensure_future(req.continue_()))
-        await self.page.goto(self.url + 'empty')
-        await self.page.setRequestInterception(False)
-        await self.page.goto(self.url + 'empty')
-
-    @sync
-    async def test_request_interception_custom_header(self):
-        await self.page.setExtraHTTPHeaders({'foo': 'bar'})
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            self.assertEqual(req.headers['foo'], 'bar')
-            await req.continue_()
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        res = await self.page.goto(self.url + 'empty')
-        self.assertEqual(res.status, 200)
-
-    @sync
-    async def test_request_interception_custom_referer_header(self):
-        await self.page.goto(self.url + 'empty')
-        await self.page.setExtraHTTPHeaders({'referer': self.url + 'empty'})
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            self.assertEqual(req.headers['referer'], self.url + 'empty')
-            await req.continue_()
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        res = await self.page.goto(self.url + 'empty')
-        self.assertEqual(res.status, 200)
-
-    @sync
-    async def test_request_interception_abort(self):
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            if req.url.endswith('.css'):
-                await req.abort()
-            else:
-                await req.continue_()
-
-        failedRequests = []
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        self.page.on('requestfailed', lambda e: failedRequests.append(e))
-        res = await self.page.goto(self.url + 'static/one-style.html')
-        self.assertTrue(res.ok)
-        self.assertIsNone(res.request.failure())
-        self.assertEqual(len(failedRequests), 1)
-
-    @sync
-    async def test_request_interception_custom_error_code(self):
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            await req.abort('internetdisconnected')
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        failedRequests = []
-        self.page.on('requestfailed', lambda req: failedRequests.append(req))
-        with self.assertRaises(PageError):
-            await self.page.goto(self.url + 'empty')
-        self.assertEqual(len(failedRequests), 1)
-        failedRequest = failedRequests[0]
-        self.assertEqual(
-            failedRequest.failure()['errorText'],
-            'net::ERR_INTERNET_DISCONNECTED',
-        )
-
-    @unittest.skip('Need server-side implementation')
-    @sync
-    async def test_request_interception_amend_http_header(self):
-        pass
-
-    @sync
-    async def test_request_interception_abort_main(self):
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            await req.abort()
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        with self.assertRaises(PageError) as cm:
-            await self.page.goto(self.url + 'empty')
-        self.assertIn('net::ERR_FAILED', cm.exception.args[0])
-
-    @sync
-    async def test_request_interception_redirects(self):
-        await self.page.setRequestInterception(True)
-        requests = []
-
-        async def check(req):
-            await req.continue_()
-            requests.append(req)
-
-        self.page.on('request', lambda req: asyncio.ensure_future(check(req)))
-        response = await self.page.goto(self.url + 'redirect1')
-        self.assertEqual(response.status, 200)
-
-    @unittest.skip('This test is not implemented')
-    @sync
-    async def test_request_interception_abort_redirects(self):
-        pass
-
-    @unittest.skip('This test is not implemented')
-    @sync
-    async def test_request_interception_equal_requests(self):
-        pass
-
-    @sync
-    async def test_request_interception_data_url(self):
-        await self.page.setRequestInterception(True)
-        requests = []
-
-        async def check(req):
-            requests.append(req)
-            await req.continue_()
-
-        self.page.on('request', lambda req: asyncio.ensure_future(check(req)))
-        dataURL = 'data:text/html,<div>yo</div>'
-        response = await self.page.goto(dataURL)
-        self.assertEqual(response.status, 200)
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0].url, dataURL)
-
-    @sync
-    async def test_request_interception_abort_data_url(self):
-        await self.page.setRequestInterception(True)
-
-        async def request_check(req):
-            await req.abort()
-
-        self.page.on('request',
-                     lambda req: asyncio.ensure_future(request_check(req)))
-        with self.assertRaises(PageError) as cm:
-            await self.page.goto('data:text/html,No way!')
-        self.assertIn('net::ERR_FAILED', cm.exception.args[0])
-
-    @sync
-    async def test_request_interception_with_hash(self):
-        await self.page.setRequestInterception(True)
-        requests = []
-
-        async def check(req):
-            requests.append(req)
-            await req.continue_()
-
-        self.page.on('request', lambda req: asyncio.ensure_future(check(req)))
-        response = await self.page.goto(self.url + 'empty#hash')
-        self.assertEqual(response.status, 200)
-        self.assertEqual(response.url, self.url + 'empty')
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0].url, self.url + 'empty')
-
-    @sync
-    async def test_request_interception_encoded_server(self):
-        await self.page.setRequestInterception(True)
-
-        async def check(req):
-            await req.continue_()
-
-        self.page.on('request', lambda req: asyncio.ensure_future(check(req)))
-        response = await self.page.goto(self.url + 'non existing page')
-        self.assertEqual(response.status, 404)
-
-    @unittest.skip('Need server-side implementation')
-    @sync
-    async def test_request_interception_badly_encoded_server(self):
-        pass
-
-    @unittest.skip('Need server-side implementation')
-    @sync
-    async def test_request_interception_encoded_server_2(self):
-        pass
-
-    @unittest.skip('This test is not implemented')
-    @sync
-    async def test_request_interception_invalid_interception_id(self):
-        pass
-
-    @sync
-    async def test_request_interception_disabled(self):
-        error = None
-
-        async def check(req):
-            try:
-                await req.continue_()
-            except Exception as e:
-                nonlocal error
-                error = e
-
-        self.page.on('request', lambda req: asyncio.ensure_future(check(req)))
-        await self.page.goto(self.url + 'empty')
-        self.assertIsNotNone(error)
-        self.assertIn('Request interception is not enabled', error.args[0])
-
-    @sync
-    async def test_request_respond(self):
-        await self.page.setRequestInterception(True)
-
-        async def interception(req):
-            await req.respond({
-                'status': 201,
-                'headers': {'foo': 'bar'},
-                'body': 'intercepted',
-            })
-
-        self.page.on(
-            'request', lambda req: asyncio.ensure_future(interception(req)))
-        response = await self.page.goto(self.url + 'empty')
-        self.assertEqual(response.status, 201)
-        self.assertEqual(response.headers['foo'], 'bar')
-        body = await self.page.evaluate('() => document.body.textContent')
-        self.assertEqual(body, 'intercepted')
-
-    @unittest.skip('Sending bynary object is not implemented')
-    @sync
-    async def test_request_respond_bytes(self):
-        pass
 
 
 class TestErrorPage(BaseTestCase):
@@ -1001,7 +945,7 @@ class TestQuerySelector(BaseTestCase):
     @sync
     async def test_jeval_not_found(self):
         await self.page.goto(self.url + 'empty')
-        with self.assertRaises(PageError) as cm:
+        with self.assertRaises(ElementHandleError) as cm:
             await self.page.Jeval('section', 'e => e.id')
         self.assertIn(
             'failed to find element matching selector "section"',
@@ -1118,7 +1062,7 @@ class TestAuthenticate(BaseTestCase):
         self.assertEqual(response.status, 200)
 
 
-class TestAuthenticateFaile(BaseTestCase):
+class TestAuthenticateFailed(BaseTestCase):
     @sync
     async def test_auth_fail(self):
         await self.page.authenticate({'username': 'foo', 'password': 'bar'})
@@ -1401,16 +1345,16 @@ class TestViewport(BaseTestCase):
             let fulfill;
             const promise = new Promise(x => fulfill = x);
             window.ontouchstart = function(e) {
-                fulfill('Recieved touch');
+                fulfill('Received touch');
             };
             window.dispatchEvent(new Event('touchstart'));
 
-            fulfill('Did not recieve touch');
+            fulfill('Did not receive touch');
 
             return promise;
         }'''
         self.assertEqual(
-            await self.page.evaluate(dispatchTouch), 'Recieved touch')
+            await self.page.evaluate(dispatchTouch), 'Received touch')
 
         await self.page.setViewport({'width': 100, 'height': 100})
         self.assertFalse(await self.page.evaluate('"ontouchstart" in window'))
@@ -1427,6 +1371,12 @@ class TestViewport(BaseTestCase):
             await self.page.evaluate('document.body.textContent.trim()'),
             'YES'
         )
+
+    @sync
+    async def test_detect_touch_viewport_touch(self):
+        await self.page.setViewport({'width': 800, 'height': 600, 'hasTouch': True})  # noqa: E501
+        await self.page.addScriptTag({'url': self.url + 'static/modernizr.js'})
+        self.assertTrue(await self.page.evaluate('() => Modernizr.touchevents'))  # noqa: E501
 
     @sync
     async def test_landscape_emulation(self):
@@ -1615,7 +1565,7 @@ class TestSelect(BaseTestCase):
         await self.page.evaluate('makeMultiple()')
         result = await self.page.select('select', 'blue', 'black', 'magenta')
         self.assertEqual(len(result), 3)
-        self.assertEqual(set(result), set(['blue', 'black', 'magenta']))
+        self.assertEqual(set(result), {'blue', 'black', 'magenta'})
 
     @sync
     async def test_select_not_multiple(self):
@@ -1934,3 +1884,9 @@ class TestEvents(BaseTestCase):
         newPage.on('close', lambda: closedPromise.set_result(True))
         await newPage.close()
         await closedPromise
+
+
+class TestBrowser(BaseTestCase):
+    @sync
+    async def test_get_browser(self):
+        self.assertIs(self.page.browser, self.browser)

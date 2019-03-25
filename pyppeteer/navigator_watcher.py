@@ -5,17 +5,12 @@
 
 import asyncio
 import concurrent.futures
-
 from typing import Any, Awaitable, Dict, List, Union
-from typing import TYPE_CHECKING
 
 from pyppeteer import helper
 from pyppeteer.errors import TimeoutError
 from pyppeteer.frame_manager import FrameManager, Frame
 from pyppeteer.util import merge_dict
-
-if TYPE_CHECKING:
-    from typing import Set  # noqa: F401
 
 
 class NavigatorWatcher:
@@ -26,29 +21,29 @@ class NavigatorWatcher:
         """Make new navigator watcher."""
         options = merge_dict(options, kwargs)
         self._validate_options(options)
-        self._frameManeger = frameManager
+        self._frameManager = frameManager
         self._frame = frame
         self._initialLoaderId = frame._loaderId
         self._timeout = timeout
         self._hasSameDocumentNavigation = False
         self._eventListeners = [
             helper.addEventListener(
-                self._frameManeger,
+                self._frameManager,
                 FrameManager.Events.LifecycleEvent,
                 self._checkLifecycleComplete,
             ),
             helper.addEventListener(
-                self._frameManeger,
+                self._frameManager,
                 FrameManager.Events.FrameNavigatedWithinDocument,
                 self._navigatedWithinDocument,
             ),
             helper.addEventListener(
-                self._frameManeger,
+                self._frameManager,
                 FrameManager.Events.FrameDetached,
                 self._checkLifecycleComplete,
             ),
         ]
-        self._loop = self._frameManeger._client._loop
+        self._loop = self._frameManager._client._loop
         self._lifecycleCompletePromise = self._loop.create_future()
 
         self._navigationPromise = self._loop.create_task(asyncio.wait([
@@ -72,13 +67,18 @@ class NavigatorWatcher:
         if options.get('waitUntil') == 'documentloaded':
             import logging
             logging.getLogger(__name__).warning(
-                '`documentloaded` option is no logner supported. '
+                '`documentloaded` option is no longer supported. '
                 'Use `domcontentloaded` instead.')
         _waitUntil = options.get('waitUntil', 'load')
         if isinstance(_waitUntil, list):
             waitUntil = _waitUntil
         elif isinstance(_waitUntil, str):
             waitUntil = [_waitUntil]
+        else:
+            raise TypeError(
+                '`waitUntil` option should be str or list of str, '
+                f'but got type {type(_waitUntil)}'
+            )
         self._expectedLifecycle: List[str] = []
         for value in waitUntil:
             protocolEvent = pyppeteerToProtocolLifecycle.get(value)

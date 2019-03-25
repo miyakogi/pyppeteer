@@ -14,7 +14,7 @@ from zipfile import ZipFile
 import urllib3
 from tqdm import tqdm
 
-from pyppeteer import __chromimum_revision__, __pyppeteer_home__
+from pyppeteer import __chromium_revision__, __pyppeteer_home__
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ DOWNLOAD_HOST = os.environ.get(
 BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
 
 REVISION = os.environ.get(
-    'PYPPETEER_CHROMIUM_REVISION', __chromimum_revision__)
+    'PYPPETEER_CHROMIUM_REVISION', __chromium_revision__)
 
 downloadURLs = {
     'linux': f'{BASE_URL}/Linux_x64/{REVISION}/chrome-linux.zip',
@@ -89,6 +89,7 @@ def download_zip(url: str) -> BytesIO:
         for chunk in data.stream(10240):
             _data.write(chunk)
             process_bar.update(len(chunk))
+        process_bar.close()
 
     logger.warning('\nchromium download done.')
     return _data
@@ -106,15 +107,23 @@ def extract_zip(data: BytesIO, path: Path) -> None:
         with zip_path.open('wb') as f:
             f.write(data.getvalue())
         if not shutil.which('unzip'):
-            raise OSError('Failed to automatically extract chrome.zip.'
+            raise OSError('Failed to automatically extract chromium.'
                           f'Please unzip {zip_path} manually.')
-        subprocess.run(['unzip', str(zip_path)], cwd=str(path))
-        if chromium_excutable().exists() and zip_path.exists():
+        proc = subprocess.run(
+            ['unzip', str(zip_path)],
+            cwd=str(path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            logger.error(proc.stdout.decode())
+            raise OSError(f'Failed to unzip {zip_path}.')
+        if chromium_executable().exists() and zip_path.exists():
             zip_path.unlink()
     else:
         with ZipFile(data) as zf:
             zf.extractall(str(path))
-    exec_path = chromium_excutable()
+    exec_path = chromium_executable()
     if not exec_path.exists():
         raise IOError('Failed to extract chromium.')
     exec_path.chmod(exec_path.stat().st_mode | stat.S_IXOTH | stat.S_IXGRP |
@@ -123,15 +132,27 @@ def extract_zip(data: BytesIO, path: Path) -> None:
 
 
 def download_chromium() -> None:
-    """Downlaod and extract chrmoium."""
+    """Download and extract chromium."""
     extract_zip(download_zip(get_url()), DOWNLOADS_FOLDER / REVISION)
 
 
 def chromium_excutable() -> Path:
+    """[Deprecated] miss-spelled function.
+
+    Use `chromium_executable` instead.
+    """
+    logger.warning(
+        '`chromium_excutable` function is deprecated. '
+        'Use `chromium_executable instead.'
+    )
+    return chromium_executable()
+
+
+def chromium_executable() -> Path:
     """Get path of the chromium executable."""
     return chromiumExecutable[current_platform()]
 
 
 def check_chromium() -> bool:
     """Check if chromium is placed at correct path."""
-    return chromium_excutable().exists()
+    return chromium_executable().exists()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 from pathlib import Path
 import sys
 import unittest
@@ -30,6 +31,38 @@ class TestClick(BaseTestCase):
         await self.page.goto(self.url + 'static/button.html')
         await self.page.click('button')
         self.assertEqual(await self.page.evaluate('result'), 'Clicked')
+
+    @sync
+    async def test_click_offscreen_button(self):
+        await self.page.goto(self.url + 'static/offscreenbuttons.html')
+        messages = []
+        self.page.on('console', lambda msg: messages.append(msg.text))
+        for i in range(11):
+            await self.page.evaluate('() => window.scrollTo(0, 0)')
+            await self.page.click('#btn{}'.format(i))
+        self.assertEqual(messages, [
+            'button #0 clicked',
+            'button #1 clicked',
+            'button #2 clicked',
+            'button #3 clicked',
+            'button #4 clicked',
+            'button #5 clicked',
+            'button #6 clicked',
+            'button #7 clicked',
+            'button #8 clicked',
+            'button #9 clicked',
+            'button #10 clicked',
+        ])
+
+    @sync
+    async def test_click_wrapped_links(self):
+        await self.page.goto(self.url + 'static/wrappedlink.html')
+        await asyncio.gather(
+            self.page.click('a'),
+            self.page.waitForNavigation(),
+        )
+        self.assertEqual(self.page.url,
+                         self.url + 'static/wrappedlink.html#clicked')
 
     @sync
     async def test_click_events(self):
@@ -334,7 +367,7 @@ class TestType(BaseTestCase):
     async def test_key_arrowkey(self):
         await self.page.goto(self.url + 'static/textarea.html')
         await self.page.type('textarea', 'Hello World!')
-        for char in 'World!':
+        for _ in 'World!':
             await self.page.keyboard.press('ArrowLeft')
         await self.page.keyboard.type('inserted ')
         result = await self.page.evaluate(
@@ -343,7 +376,7 @@ class TestType(BaseTestCase):
         self.assertEqual(result, 'Hello inserted World!')
 
         await self.page.keyboard.down('Shift')
-        for char in 'inserted ':
+        for _ in 'inserted ':
             await self.page.keyboard.press('ArrowLeft')
         await self.page.keyboard.up('Shift')
         await self.page.keyboard.press('Backspace')

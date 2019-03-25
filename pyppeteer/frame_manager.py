@@ -104,11 +104,11 @@ class FrameManager(EventEmitter):
 
     @property
     def mainFrame(self) -> Optional['Frame']:
-        """Retrun main frame."""
+        """Return main frame."""
         return self._mainFrame
 
     def frames(self) -> List['Frame']:
-        """Retrun all frames."""
+        """Return all frames."""
         return list(self._frames.values())
 
     def frame(self, frameId: str) -> Optional['Frame']:
@@ -119,7 +119,7 @@ class FrameManager(EventEmitter):
         if frameId in self._frames:
             return
         parentFrame = self._frames.get(parentFrameId)
-        frame = Frame(self._client, self._page, parentFrame, frameId)
+        frame = Frame(self._client, parentFrame, frameId)
         self._frames[frameId] = frame
         self.emit(FrameManager.Events.FrameAttached, frame)
 
@@ -147,7 +147,7 @@ class FrameManager(EventEmitter):
                 frame._id = _id
             else:
                 # Initial main frame navigation.
-                frame = Frame(self._client, self._page, None, _id)
+                frame = Frame(self._client, None, _id)
             self._frames[_id] = frame
             self._mainFrame = frame
 
@@ -232,10 +232,9 @@ class Frame(object):
     Frame objects can be obtained via :attr:`pyppeteer.page.Page.mainFrame`.
     """
 
-    def __init__(self, client: CDPSession, page: Any,
-                 parentFrame: Optional['Frame'], frameId: str) -> None:
+    def __init__(self, client: CDPSession, parentFrame: Optional['Frame'],
+                 frameId: str) -> None:
         self._client = client
-        self._page = page
         self._parentFrame = parentFrame
         self._url = ''
         self._detached = False
@@ -274,7 +273,7 @@ class Frame(object):
         return await self._contextPromise
 
     async def evaluateHandle(self, pageFunction: str, *args: Any) -> JSHandle:
-        """Execute fucntion on this frame.
+        """Execute function on this frame.
 
         Details see :meth:`pyppeteer.page.Page.evaluateHandle`.
         """
@@ -317,9 +316,9 @@ class Frame(object):
         return document
 
     async def xpath(self, expression: str) -> List[ElementHandle]:
-        """Evaluate XPath expression.
+        """Evaluate the XPath expression.
 
-        If there is no such element in this frame, return None.
+        If there are no such elements in this frame, return an empty list.
 
         :arg str expression: XPath string to be evaluated.
         """
@@ -328,19 +327,13 @@ class Frame(object):
         return value
 
     async def querySelectorEval(self, selector: str, pageFunction: str,
-                                *args: Any) -> Optional[Any]:
+                                *args: Any) -> Any:
         """Execute function on element which matches selector.
 
         Details see :meth:`pyppeteer.page.Page.querySelectorEval`.
         """
-        elementHandle = await self.querySelector(selector)
-        if elementHandle is None:
-            raise PageError(
-                f'Error: failed to find element matching selector "{selector}"'
-            )
-        result = await self.evaluate(pageFunction, elementHandle, *args)
-        await elementHandle.dispose()
-        return result
+        document = await self._document()
+        return await document.querySelectorEval(selector, pageFunction, *args)
 
     async def querySelectorAllEval(self, selector: str, pageFunction: str,
                                    *args: Any) -> Optional[Dict]:
@@ -348,19 +341,12 @@ class Frame(object):
 
         Details see :meth:`pyppeteer.page.Page.querySelectorAllEval`.
         """
-        context = await self.executionContext()
-        if context is None:
-            raise ElementHandleError('ExecutionContext is None.')
-        arrayHandle = await context.evaluateHandle(
-            'selector => Array.from(document.querySelectorAll(selector))',
-            selector,
-        )
-        result = await self.evaluate(pageFunction, arrayHandle, *args)
-        await arrayHandle.dispose()
-        return result
+        document = await self._document()
+        value = await document.JJeval(selector, pageFunction, *args)
+        return value
 
     async def querySelectorAll(self, selector: str) -> List[ElementHandle]:
-        """Get all elelments which matches `selector`.
+        """Get all elements which matches `selector`.
 
         Details see :meth:`pyppeteer.page.Page.querySelectorAll`.
         """
@@ -585,7 +571,7 @@ function(html) {
         await handle.dispose()
 
     async def focus(self, selector: str) -> None:
-        """Fucus element which matches ``selector``.
+        """Focus element which matches ``selector``.
 
         Details see :meth:`pyppeteer.page.Page.focus`.
         """
@@ -748,7 +734,6 @@ function(html) {
     }
 }
         '''  # noqa: E501
-        timeout = options.get('timeout', 30000)
         return WaitTask(
             self,
             predicate,
@@ -768,6 +753,7 @@ function(html) {
 
     def _navigated(self, framePayload: dict) -> None:
         self._name = framePayload.get('name', '')
+        self._navigationURL = framePayload.get('url', '')
         self._url = framePayload.get('url', '')
 
     def _navigatedWithinDocument(self, url: str) -> None:
@@ -883,9 +869,15 @@ class WaitTask(object):
                 await success.dispose()
             return
 
-        if not error and success and (
-                await self._frame.evaluate('s => !s', success)):
-            await success.dispose()
+        # Add try/except referring to puppeteer.
+        try:
+            if not error and success and (
+                    await self._frame.evaluate('s => !s', success)):
+                await success.dispose()
+                return
+        except NetworkError:
+            if success is not None:
+                await success.dispose()
             return
 
         # page is navigated and context is destroyed.
@@ -916,7 +908,8 @@ waitForPredicatePageFunction = """
 async function waitForPredicatePageFunction(predicateBody, polling, timeout, ...args) {
   const predicate = new Function('...args', predicateBody);
   let timedOut = false;
-  setTimeout(() => timedOut = true, timeout);
+  if (timeout)
+    setTimeout(() => timedOut = true, timeout);
   if (polling === 'raf')
     return await pollRaf();
   if (polling === 'mutation')

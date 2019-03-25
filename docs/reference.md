@@ -46,6 +46,13 @@ Browser Class
    :members:
    :exclude-members: create
 
+BrowserContext Class
+--------------------
+
+.. currentmodule:: pyppeteer.browser
+
+.. autoclass:: pyppeteer.browser.BrowserContext
+   :members:
 
 Page Class
 ----------
@@ -55,6 +62,14 @@ Page Class
 .. autoclass:: pyppeteer.page.Page
    :members:
    :exclude-members: create
+
+Worker Class
+------------
+
+.. currentmodule:: pyppeteer.worker
+
+.. autoclass:: pyppeteer.worker.Worker
+   :members:
 
 Keyboard Class
 --------------
@@ -165,4 +180,28 @@ Coverage Class
 
 .. autoclass:: pyppeteer.coverage.Coverage
    :members:
-.
+
+Debugging
+---------
+
+For debugging, you can set `logLevel` option to `logging.DEBUG` for
+:func:`pyppeteer.launcher.launch` and :func:`pyppeteer.launcher.connect`
+functions. However, this option prints too many logs including SEND/RECV
+messages of pyppeteer. In order to only show suppressed error messages, you
+should set ``pyppeteer.DEBUG`` to ``True``.
+
+Example:
+
+```python
+import asyncio
+import pyppeteer
+from pyppeteer import launch
+
+pyppeteer.DEBUG = True  # print suppressed errors as error log
+
+async def main():
+    browser = await launch()
+    ...  # do something
+
+asyncio.get_event_loop().run_until_complete(main())
+```

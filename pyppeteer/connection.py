@@ -4,10 +4,9 @@
 """Connection/Session management module."""
 
 import asyncio
-import concurrent.futures
 import json
 import logging
-from typing import Awaitable, Callable, TYPE_CHECKING
+from typing import Awaitable, Callable, Dict, Union, TYPE_CHECKING
 
 from pyee import EventEmitter
 import websockets
@@ -15,9 +14,11 @@ import websockets
 from pyppeteer.errors import NetworkError
 
 if TYPE_CHECKING:
-    from typing import Dict, Optional  # noqa: F401
+    from typing import Optional  # noqa: F401
 
 logger = logging.getLogger(__name__)
+logger_connection = logging.getLogger(__name__ + '.Connection')
+logger_session = logging.getLogger(__name__ + '.CDPSession')
 
 
 class Connection(EventEmitter):
@@ -28,7 +29,7 @@ class Connection(EventEmitter):
         """Make connection.
 
         :arg str url: WebSocket url to connect devtool.
-        :arg int delay: delay to wait before processing recieved messages.
+        :arg int delay: delay to wait before processing received messages.
         """
         super().__init__()
         self._url = url
@@ -91,30 +92,35 @@ class Connection(EventEmitter):
             method=method,
             params=params,
         ))
-        logger.debug(f'SEND: {msg}')
+        logger_connection.debug(f'SEND: {msg}')
         self._loop.create_task(self._async_send(msg, _id))
         callback = self._loop.create_future()
         self._callbacks[_id] = callback
-        callback.method = method  # type: ignore
+        callback.error: Exception = NetworkError()  # type: ignore
+        callback.method: str = method  # type: ignore
         return callback
 
-    async def _on_response(self, msg: dict) -> None:
+    def _on_response(self, msg: dict) -> None:
         callback = self._callbacks.pop(msg.get('id', -1))
-        if 'error' in msg:
-            error = msg['error']
+        if msg.get('error'):
             callback.set_exception(
-                NetworkError(f'Protocol Error: {error}'))
+                _createProtocolError(
+                    callback.error,  # type: ignore
+                    callback.method,  # type: ignore
+                    msg
+                )
+            )
         else:
             callback.set_result(msg.get('result'))
 
-    async def _on_query(self, msg: dict) -> None:
+    def _on_query(self, msg: dict) -> None:
         params = msg.get('params', {})
         method = msg.get('method', '')
         sessionId = params.get('sessionId')
         if method == 'Target.receivedMessageFromTarget':
             session = self._sessions.get(sessionId)
             if session:
-                await session._on_message(params.get('message'))
+                session._on_message(params.get('message'))
         elif method == 'Target.detachedFromTarget':
             session = self._sessions.get(sessionId)
             if session:
@@ -129,12 +135,12 @@ class Connection(EventEmitter):
 
     async def _on_message(self, message: str) -> None:
         await asyncio.sleep(self._delay)
-        logger.debug(f'RECV: {message}')
+        logger_connection.debug(f'RECV: {message}')
         msg = json.loads(message)
         if msg.get('id') in self._callbacks:
-            await self._on_response(msg)
+            self._on_response(msg)
         else:
-            await self._on_query(msg)
+            self._on_query(msg)
 
     async def _on_close(self) -> None:
         if self._closeCallback:
@@ -142,7 +148,10 @@ class Connection(EventEmitter):
             self._closeCallback = None
 
         for cb in self._callbacks.values():
-            cb.cancel()
+            cb.set_exception(_rewriteError(
+                cb.error,  # type: ignore
+                f'Protocol error {cb.method}: Target closed.',  # type: ignore
+            ))
         self._callbacks.clear()
 
         for session in self._sessions.values():
@@ -160,14 +169,14 @@ class Connection(EventEmitter):
         self._connected = False
         await self._on_close()
 
-    async def createSession(self, targetId: str) -> 'CDPSession':
+    async def createSession(self, targetInfo: Dict) -> 'CDPSession':
         """Create new session."""
         resp = await self.send(
             'Target.attachToTarget',
-            {'targetId': targetId}
+            {'targetId': targetInfo['targetId']}
         )
         sessionId = resp.get('sessionId')
-        session = CDPSession(self, targetId, sessionId, self._loop)
+        session = CDPSession(self, targetInfo['type'], sessionId, self._loop)
         self._sessions[sessionId] = session
         return session
 
@@ -185,60 +194,85 @@ class CDPSession(EventEmitter):
     `here <https://chromedevtools.github.io/devtools-protocol/>`_.
     """
 
-    def __init__(self, connection: Connection, targetId: str, sessionId: str,
+    def __init__(self, connection: Union[Connection, 'CDPSession'],
+                 targetType: str, sessionId: str,
                  loop: asyncio.AbstractEventLoop) -> None:
         """Make new session."""
         super().__init__()
         self._lastId = 0
         self._callbacks: Dict[int, asyncio.Future] = {}
         self._connection: Optional[Connection] = connection
-        self._targetId = targetId
+        self._targetType = targetType
         self._sessionId = sessionId
+        self._sessions: Dict[str, CDPSession] = dict()
         self._loop = loop
 
-    async def send(self, method: str, params: dict = None) -> dict:
+    def send(self, method: str, params: dict = None) -> Awaitable:
         """Send message to the connected session.
 
         :arg str method: Protocol method name.
         :arg dict params: Optional method parameters.
         """
+        if not self._connection:
+            raise NetworkError(
+                f'Protocol Error ({method}): Session closed. Most likely the '
+                f'{self._targetType} has been closed.'
+            )
         self._lastId += 1
         _id = self._lastId
         msg = json.dumps(dict(id=_id, method=method, params=params))
+        logger_session.debug(f'SEND: {msg}')
 
         callback = self._loop.create_future()
         self._callbacks[_id] = callback
+        callback.error: Exception = NetworkError()  # type: ignore
         callback.method: str = method  # type: ignore
-        if not self._connection:
-            raise NetworkError('Connection closed.')
         try:
-            await self._connection.send('Target.sendMessageToTarget', {
+            self._connection.send('Target.sendMessageToTarget', {
                 'sessionId': self._sessionId,
                 'message': msg,
             })
-        except concurrent.futures.CancelledError:
-            raise NetworkError("connection unexpectedly closed")
-        return await callback
+        except Exception as e:
+            # The response from target might have been already dispatched
+            if _id in self._callbacks:
+                del self._callbacks[_id]
+                _callback = self._callbacks[_id]
+                _callback.set_exception(_rewriteError(
+                    _callback.error,  # type: ignore
+                    e.args[0],
+                ))
+        return callback
 
-    async def _on_message(self, msg: str) -> None:
+    def _on_message(self, msg: str) -> None:  # noqa: C901
+        logger_session.debug(f'RECV: {msg}')
         obj = json.loads(msg)
         _id = obj.get('id')
         if _id:
             callback = self._callbacks.get(_id)
             if callback:
                 del self._callbacks[_id]
-                if 'error' in obj:
-                    error = obj['error']
-                    msg = error.get('message')
-                    data = error.get('data')
-                    callback.set_exception(
-                        NetworkError(f'Protocol Error: {msg} {data}')
-                    )
+                if obj.get('error'):
+                    callback.set_exception(_createProtocolError(
+                        callback.error,  # type: ignore
+                        callback.method,  # type: ignore
+                        obj,
+                    ))
                 else:
                     result = obj.get('result')
                     if callback and not callback.done():
                         callback.set_result(result)
         else:
+            params = obj.get('params', {})
+            if obj.get('method') == 'Target.receivedMessageFromTarget':
+                session = self._sessions.get(params.get('sessionId'))
+                if session:
+                    session._on_message(params.get('message'))
+            elif obj.get('method') == 'Target.detachFromTarget':
+                sessionId = params.get('sessionId')
+                session = self._sessions.get(sessionId)
+                if session:
+                    session._on_closed()
+                    del self._sessions[sessionId]
             self.emit(obj.get('method'), obj.get('params'))
 
     async def detach(self) -> None:
@@ -254,6 +288,27 @@ class CDPSession(EventEmitter):
 
     def _on_closed(self) -> None:
         for cb in self._callbacks.values():
-            cb.cancel()
+            cb.set_exception(_rewriteError(
+                cb.error,  # type: ignore
+                f'Protocol error {cb.method}: Target closed.',  # type: ignore
+            ))
         self._callbacks.clear()
         self._connection = None
+
+    def _createSession(self, targetType: str, sessionId: str) -> 'CDPSession':
+        session = CDPSession(self, targetType, sessionId, self._loop)
+        self._sessions[sessionId] = session
+        return session
+
+
+def _createProtocolError(error: Exception, method: str, obj: Dict
+                         ) -> Exception:
+    message = f'Protocol error ({method}): {obj["error"]["message"]}'
+    if 'data' in obj['error']:
+        message += f' {obj["error"]["data"]}'
+    return _rewriteError(error, message)
+
+
+def _rewriteError(error: Exception, message: str) -> Exception:
+    error.args = (message, )
+    return error

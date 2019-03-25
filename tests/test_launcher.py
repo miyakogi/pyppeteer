@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from copy import deepcopy
 import glob
 import logging
 import os
@@ -17,7 +18,7 @@ from syncer import sync
 import websockets
 
 from pyppeteer import connect, launch, executablePath
-from pyppeteer.chromium_downloader import chromium_excutable
+from pyppeteer.chromium_downloader import chromium_excutable, current_platform
 from pyppeteer.errors import NetworkError
 from pyppeteer.launcher import Launcher
 from pyppeteer.util import get_free_port
@@ -53,9 +54,9 @@ class TestLauncher(unittest.TestCase):
 
     def test_disable_default_args(self):
         launcher = Launcher(ignoreDefaultArgs=True)
-        # check defatul args
+        # check default args
         self.assertNotIn('--no-first-run', launcher.chrome_args)
-        # check dev tools port
+        # check devtools port
         self.assertNotIn(
             '--remote-debugging-port={}'.format(launcher.port),
             launcher.chrome_args,
@@ -143,6 +144,44 @@ class TestLauncher(unittest.TestCase):
         self.assertIn('DUMPIO_TEST', proc.stderr.decode())
 
 
+class TestDefaultURL(unittest.TestCase):
+    @sync
+    async def test_default_url(self):
+        browser = await launch(DEFAULT_OPTIONS)
+        pages = await browser.pages()
+        url_list = []
+        for page in pages:
+            url_list.append(page.url)
+        self.assertEqual(url_list, ['about:blank'])
+        await browser.close()
+
+    @unittest.skipIf('CI' in os.environ, 'Skip in-browser test on CI')
+    @sync
+    async def test_default_url_not_headless(self):
+        options = deepcopy(DEFAULT_OPTIONS)
+        options['headless'] = False
+        browser = await launch(options)
+        pages = await browser.pages()
+        url_list = []
+        for page in pages:
+            url_list.append(page.url)
+        self.assertEqual(url_list, ['about:blank'])
+        await browser.close()
+
+    @sync
+    async def test_custom_url(self):
+        customUrl = 'http://example.com/'
+        options = deepcopy(DEFAULT_OPTIONS)
+        options['args'].append(customUrl)
+        browser = await launch(options)
+        pages = await browser.pages()
+        self.assertEqual(len(pages), 1)
+        if pages[0].url != customUrl:
+            await pages[0].waitForNavigation()
+        self.assertEqual(pages[0].url, customUrl)
+        await browser.close()
+
+
 class TestMixedContent(unittest.TestCase):
     @unittest.skip('need server-side implementation')
     @sync
@@ -151,7 +190,7 @@ class TestMixedContent(unittest.TestCase):
         options.update(DEFAULT_OPTIONS)
         browser = await launch(options)
         page = await browser.newPage()
-        page.goto()
+        # page.goto()
         await page.close()
         await browser.close()
 
@@ -177,6 +216,7 @@ class TestLogLevel(unittest.TestCase):
         self.assertFalse(self.logger.isEnabledFor(logging.DEBUG))
         self.mock.assert_not_called()
 
+    @unittest.skipIf(current_platform().startswith('win'), 'error on windows')
     @sync
     async def test_level_info(self):
         browser = await launch(args=['--no-sandbox'], logLevel=logging.INFO)
@@ -188,6 +228,7 @@ class TestLogLevel(unittest.TestCase):
 
         self.assertIn('listening on', self.mock.call_args_list[0][0][0])
 
+    @unittest.skipIf(current_platform().startswith('win'), 'error on windows')
     @sync
     async def test_level_debug(self):
         browser = await launch(args=['--no-sandbox'], logLevel=logging.DEBUG)
@@ -201,6 +242,7 @@ class TestLogLevel(unittest.TestCase):
         self.assertIn('SEND', self.mock.call_args_list[2][0][0])
         self.assertIn('RECV', self.mock.call_args_list[4][0][0])
 
+    @unittest.skipIf(current_platform().startswith('win'), 'error on windows')
     @sync
     async def test_connect_debug(self):
         browser = await launch(args=['--no-sandbox'])
@@ -252,6 +294,8 @@ class TestUserDataDir(unittest.TestCase):
     @sync
     async def test_user_data_dir_option(self):
         browser = await launch(DEFAULT_OPTIONS, userDataDir=self.datadir)
+        # Open a page to make sure its functional
+        await browser.newPage()
         self.assertGreater(len(glob.glob(os.path.join(self.datadir, '**'))), 0)
         await browser.close()
         self.assertGreater(len(glob.glob(os.path.join(self.datadir, '**'))), 0)
@@ -283,9 +327,9 @@ class TestUserDataDir(unittest.TestCase):
         await browser2.close()
         self.assertEqual(result, 'hello')
 
-    @unittest.skipIf('CI' in os.environ, 'skip headful test on CI server')
+    @unittest.skipIf('CI' in os.environ, 'skip in-browser test on CI server')
     @sync
-    async def test_user_data_dir_restore_cookie_headful(self):
+    async def test_user_data_dir_restore_cookie_in_browser(self):
         browser = await launch(
             DEFAULT_OPTIONS, userDataDir=self.datadir, headless=False)
         page = await browser.newPage()
@@ -313,7 +357,7 @@ class TestClose(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
         wsEndPoint = proc.stdout.decode()
-        # chrome should be already closed, so fail to connet websocket
+        # chrome should be already closed, so fail to connect websocket
         with self.assertRaises(OSError):
             await websockets.client.connect(wsEndPoint)
 
@@ -322,8 +366,8 @@ class TestEventLoop(unittest.TestCase):
     def test_event_loop(self):
         loop = asyncio.new_event_loop()
 
-        async def inner(loop) -> None:
-            browser = await launch(args=['--no-sandbox'], loop=loop)
+        async def inner(_loop) -> None:
+            browser = await launch(args=['--no-sandbox'], loop=_loop)
             page = await browser.newPage()
             await page.goto('http://example.com')
             result = await page.evaluate('() => 1 + 2')

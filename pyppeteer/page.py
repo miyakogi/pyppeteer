@@ -25,14 +25,16 @@ from pyppeteer.errors import PageError
 from pyppeteer.execution_context import JSHandle  # noqa: F401
 from pyppeteer.frame_manager import Frame  # noqa: F401
 from pyppeteer.frame_manager import FrameManager
+from pyppeteer.helper import debugError
 from pyppeteer.input import Keyboard, Mouse, Touchscreen
 from pyppeteer.navigator_watcher import NavigatorWatcher
 from pyppeteer.network_manager import NetworkManager, Response, Request
 from pyppeteer.tracing import Tracing
 from pyppeteer.util import merge_dict
+from pyppeteer.worker import Worker
 
 if TYPE_CHECKING:
-    from pyppeteer.browser import Target  # noqa: F401
+    from pyppeteer.browser import Browser, Target  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,8 @@ class Page(EventEmitter):
         FrameNavigated='framenavigated',
         Load='load',
         Metrics='metrics',
+        WorkerCreated='workercreated',
+        WorkerDestroyed='workerdestroyed',
     )
 
     PaperFormats: Dict[str, Dict[str, float]] = dict(
@@ -82,7 +86,7 @@ class Page(EventEmitter):
 
     @staticmethod
     async def create(client: CDPSession, target: 'Target',
-                     ignoreHTTPSErrors: bool = False, appMode: bool = False,
+                     ignoreHTTPSErrors: bool, setDefaultViewport: bool,
                      screenshotTaskQueue: list = None) -> 'Page':
         """Async function which makes new page object."""
         await client.send('Page.enable'),
@@ -91,24 +95,26 @@ class Page(EventEmitter):
                     screenshotTaskQueue)
 
         await asyncio.gather(
+            client.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False}),  # noqa: E501
             client.send('Page.setLifecycleEventsEnabled', {'enabled': True}),
             client.send('Network.enable', {}),
             client.send('Runtime.enable', {}),
             client.send('Security.enable', {}),
             client.send('Performance.enable', {}),
+            client.send('Log.enable', {}),
         )
         if ignoreHTTPSErrors:
             await client.send('Security.setOverrideCertificateErrors',
                               {'override': True})
-        if not appMode:
+        if setDefaultViewport:
             await page.setViewport({'width': 800, 'height': 600})
         return page
 
-    def __init__(self, client: CDPSession, target: 'Target', frameTree: Dict,
-                 ignoreHTTPSErrors: bool = False,
-                 screenshotTaskQueue: list = None,
-                 ) -> None:
+    def __init__(self, client: CDPSession, target: 'Target',  # noqa: C901
+                 frameTree: Dict, ignoreHTTPSErrors: bool,
+                 screenshotTaskQueue: list = None) -> None:
         super().__init__()
+        self._closed = False
         self._client = client
         self._target = target
         self._keyboard = Keyboard(client)
@@ -118,7 +124,7 @@ class Page(EventEmitter):
         self._networkManager = NetworkManager(client, self._frameManager)
         self._emulationManager = EmulationManager(client)
         self._tracing = Tracing(client)
-        self._pageBindings: Dict[str, Callable] = dict()
+        self._pageBindings: Dict[str, Callable[..., Any]] = dict()
         self._ignoreHTTPSErrors = ignoreHTTPSErrors
         self._defaultNavigationTimeout = 30000  # milliseconds
         self._coverage = Coverage(client)
@@ -126,6 +132,41 @@ class Page(EventEmitter):
         if screenshotTaskQueue is None:
             screenshotTaskQueue = list()
         self._screenshotTaskQueue = screenshotTaskQueue
+
+        self._workers: Dict[str, Worker] = dict()
+
+        def _onTargetAttached(event: Dict) -> None:
+            targetInfo = event['targetInfo']
+            if targetInfo['type'] != 'worker':
+                # If we don't detach from service workers, they will never die.
+                try:
+                    client.send('Target.detachFromTarget', {
+                        'sessionId': event['sessionId'],
+                    })
+                except Exception as e:
+                    debugError(logger, e)
+                return
+            sessionId = event['sessionId']
+            session = client._createSession(targetInfo['type'], sessionId)
+            worker = Worker(
+                session,
+                targetInfo['url'],
+                self._addConsoleMessage,
+                self._handleException,
+            )
+            self._workers[sessionId] = worker
+            self.emit(Page.Events.WorkerCreated, worker)
+
+        def _onTargetDetached(event: Dict) -> None:
+            sessionId = event['sessionId']
+            worker = self._workers.get(sessionId)
+            if worker is None:
+                return
+            self.emit(Page.Events.WorkerDestroyed, worker)
+            del self._workers[sessionId]
+
+        client.on('Target.attachedToTarget', _onTargetAttached)
+        client.on('Target.detachedFromTarget', _onTargetDetached)
 
         _fm = self._frameManager
         _fm.on(FrameManager.Events.FrameAttached,
@@ -151,6 +192,8 @@ class Page(EventEmitter):
                   lambda event: self.emit(Page.Events.Load))
         client.on('Runtime.consoleAPICalled',
                   lambda event: self._onConsoleAPI(event))
+        client.on('Runtime.bindingCalled',
+                  lambda event: self._onBindingCalled(event))
         client.on('Page.javascriptDialogOpening',
                   lambda event: self._onDialog(event))
         client.on('Runtime.exceptionThrown',
@@ -162,9 +205,12 @@ class Page(EventEmitter):
                   lambda event: self._onTargetCrashed())
         client.on('Performance.metrics',
                   lambda event: self._emitMetrics(event))
+        client.on('Log.entryAdded',
+                  lambda event: self._onLogEntryAdded(event))
 
         def closed(fut: asyncio.futures.Future) -> None:
             self.emit(Page.Events.Close)
+            self._closed = True
 
         self._target._isClosedPromise.add_done_callback(closed)
 
@@ -173,8 +219,25 @@ class Page(EventEmitter):
         """Return a target this page created from."""
         return self._target
 
+    @property
+    def browser(self) -> 'Browser':
+        """Get the browser the page belongs to."""
+        return self._target.browser
+
     def _onTargetCrashed(self, *args: Any, **kwargs: Any) -> None:
         self.emit('error', PageError('Page crashed!'))
+
+    def _onLogEntryAdded(self, event: Dict) -> None:
+        entry = event.get('entry', {})
+        level = entry.get('level', '')
+        text = entry.get('text', '')
+        args = entry.get('args', [])
+        source = entry.get('source', '')
+        for arg in args:
+            helper.releaseObject(self._client, arg)
+
+        if source != 'worker':
+            self.emit(Page.Events.Console, ConsoleMessage(level, text))
 
     @property
     def mainFrame(self) -> Optional['Frame']:
@@ -216,8 +279,22 @@ class Page(EventEmitter):
         """Get all frames of this page."""
         return list(self._frameManager.frames())
 
+    @property
+    def workers(self) -> List[Worker]:
+        """Get all workers of this page."""
+        return list(self._workers.values())
+
     async def setRequestInterception(self, value: bool) -> None:
-        """Enable/disable request interception."""
+        """Enable/disable request interception.
+
+        Activating request interception enables
+        :class:`~pyppeteer.network_manager.Request` class's
+        :meth:`~pyppeteer.network_manager.Request.abort`,
+        :meth:`~pyppeteer.network_manager.Request.continue_`, and
+        :meth:`~pyppeteer.network_manager.Request.response` methods.
+        This provides the capability to modify network requests that are made
+        by a page.
+        """
         return await self._networkManager.setRequestInterception(value)
 
     async def setOfflineMode(self, enabled: bool) -> None:
@@ -241,11 +318,17 @@ class Page(EventEmitter):
         """
         self._defaultNavigationTimeout = timeout
 
+    async def _send(self, method: str, msg: dict) -> None:
+        try:
+            await self._client.send(method, msg)
+        except Exception as e:
+            debugError(logger, e)
+
     def _onCertificateError(self, event: Any) -> None:
         if not self._ignoreHTTPSErrors:
             return
         self._client._loop.create_task(
-            self._client.send('Security.handleCertificateError', {
+            self._send('Security.handleCertificateError', {
                 'eventId': event.get('eventId'),
                 'action': 'continue'
             })
@@ -327,7 +410,7 @@ class Page(EventEmitter):
         return await frame.querySelectorAllEval(selector, pageFunction, *args)
 
     async def querySelectorAll(self, selector: str) -> List[ElementHandle]:
-        """Get all element which matches `selector` as a list.
+        """Get all element which matches ``selector`` as a list.
 
         :arg str selector: A selector to search element.
         :return List[ElementHandle]: List of
@@ -341,9 +424,9 @@ class Page(EventEmitter):
         return await frame.querySelectorAll(selector)
 
     async def xpath(self, expression: str) -> List[ElementHandle]:
-        """Evaluate XPath expression.
+        """Evaluate the XPath expression.
 
-        If there is no such element in this page, return None.
+        If there are no such elements in this page, return an empty list.
 
         :arg str expression: XPath string to be evaluated.
         """
@@ -395,7 +478,7 @@ class Page(EventEmitter):
 
         ``cookies`` should be dictionaries which contain these fields:
 
-        * ``name`` (str): **requiered**
+        * ``name`` (str): **required**
         * ``url`` (str)
         * ``domain`` (str)
         * ``path`` (str)
@@ -411,10 +494,10 @@ class Page(EventEmitter):
     async def setCookie(self, *cookies: dict) -> None:
         """Set cookies.
 
-        ``coockies`` should be dictionaries which contain these fields:
+        ``cookies`` should be dictionaries which contain these fields:
 
-        * ``name`` (str): **requiered**
-        * ``value`` (str): **requiered**
+        * ``name`` (str): **required**
+        * ``value`` (str): **required**
         * ``url`` (str)
         * ``domain`` (str)
         * ``path`` (str)
@@ -491,7 +574,8 @@ class Page(EventEmitter):
             raise PageError('no main frame.')
         return await frame.injectFile(filePath)
 
-    async def exposeFunction(self, name: str, pyppeteerFunction: Callable
+    async def exposeFunction(self, name: str,
+                             pyppeteerFunction: Callable[..., Any]
                              ) -> None:
         """Add python function to the browser's ``window`` object as ``name``.
 
@@ -509,6 +593,7 @@ class Page(EventEmitter):
 
         addPageBinding = '''
 function addPageBinding(bindingName) {
+  const binding = window[bindingName];
   window[bindingName] = async(...args) => {
     const me = window[bindingName];
     let callbacks = me['callbacks'];
@@ -519,19 +604,24 @@ function addPageBinding(bindingName) {
     const seq = (me['lastSeq'] || 0) + 1;
     me['lastSeq'] = seq;
     const promise = new Promise(fulfill => callbacks.set(seq, fulfill));
-    // eslint-disable-next-line no-console
-    console.debug('driver:page-binding', JSON.stringify({name: bindingName, seq, args}));
+    binding(JSON.stringify({name: bindingName, seq, args}));
     return promise;
   };
 }
         '''  # noqa: E501
         expression = helper.evaluationString(addPageBinding, name)
+        await self._client.send('Runtime.addBinding', {'name': name})
         await self._client.send('Page.addScriptToEvaluateOnNewDocument',
                                 {'source': expression})
-        await asyncio.wait([
-            frame.evaluate(expression, force_expr=True)
-            for frame in self.frames
-        ])
+
+        async def _evaluate(frame: Frame, expression: str) -> None:
+            try:
+                await frame.evaluate(expression, force_expr=True)
+            except Exception as e:
+                debugError(logger, e)
+
+        await asyncio.wait([_evaluate(frame, expression)
+                            for frame in self.frames])
 
     async def authenticate(self, credentials: Dict[str, str]) -> Any:
         """Provide credentials for http authentication.
@@ -551,9 +641,9 @@ function addPageBinding(bindingName) {
             ``page.setExtraHTTPHeaders`` does not guarantee the order of
             headers in the outgoing requests.
 
-        :arg Dict headers: A dictionary containing additional http headrs to be
-                           sent with every requests. All header values must be
-                           string.
+        :arg Dict headers: A dictionary containing additional http headers to
+                           be sent with every requests. All header values must
+                           be string.
         """
         return await self._networkManager.setExtraHTTPHeaders(headers)
 
@@ -609,50 +699,51 @@ function addPageBinding(bindingName) {
         self.emit(Page.Events.PageError, PageError(message))
 
     def _onConsoleAPI(self, event: dict) -> None:
-        _args = event.get('args', [])
-        if (event.get('type') == 'debug' and _args and
-                _args[0].get('value') == 'driver:page-binding'):
-            obj = json.loads(_args[1]['value'])
-            name = obj.get('name')
-            seq = obj.get('seq')
-            args = obj.get('args')
-            result = self._pageBindings[name](*args)
-
-            deliverResult = '''
-function deliverResult(name, seq, result) {
-  window[name]['callbacks'].get(seq)(result);
-  window[name]['callbacks'].delete(seq);
-}
-            '''
-            expression = helper.evaluationString(
-                deliverResult, name, seq, result)
-            self._client._loop.create_task(self._client.send(
-                'Runtime.evaluate', {
-                    'expression': expression,
-                    'contextId': event['executionContextId'],
-                }
-            ))
-            return
-
-        if not self.listeners(Page.Events.Console):
-            for arg in _args:
-                self._client._loop.create_task(
-                    helper.releaseObject(self._client, arg))
-            return
-
         _id = event['executionContextId']
-        values = []
-        for arg in _args:
+        values: List[JSHandle] = []
+        for arg in event.get('args', []):
             values.append(self._frameManager.createJSHandle(_id, arg))
+        self._addConsoleMessage(event['type'], values)
+
+    def _onBindingCalled(self, event: Dict) -> None:
+        obj = json.loads(event['payload'])
+        name = obj['name']
+        seq = obj['seq']
+        args = obj['args']
+        result = self._pageBindings[name](*args)
+
+        deliverResult = '''
+            function deliverResult(name, seq, result) {
+                window[name]['callbacks'].get(seq)(result);
+                window[name]['callbacks'].delete(seq);
+            }
+        '''
+
+        expression = helper.evaluationString(deliverResult, name, seq, result)
+        try:
+            self._client.send('Runtime.evaluate', {
+                'expression': expression,
+                'contextId': event['executionContextId'],
+            })
+        except Exception as e:
+            helper.debugError(logger, e)
+
+    def _addConsoleMessage(self, type: str, args: List[JSHandle]) -> None:
+        if not self.listeners(Page.Events.Console):
+            for arg in args:
+                self._client._loop.create_task(arg.dispose())
+            return
 
         textTokens = []
-        for arg, value in zip(_args, values):
-            if arg.get('objectId'):
-                textTokens.append(value.toString())
+        for arg in args:
+            remoteObject = arg._remoteObject
+            if remoteObject.get('objectId'):
+                textTokens.append(arg.toString())
             else:
-                textTokens.append(str(helper.valueFromRemoteObject(arg)))
+                textTokens.append(
+                    str(helper.valueFromRemoteObject(remoteObject)))
 
-        message = ConsoleMessage(event['type'], ' '.join(textTokens), values)
+        message = ConsoleMessage(type, ' '.join(textTokens), args)
         self.emit(Page.Events.Console, message)
 
     def _onDialog(self, event: Any) -> None:
@@ -660,11 +751,11 @@ function deliverResult(name, seq, result) {
         _type = event.get('type')
         if _type == 'alert':
             dialogType = Dialog.Type.Alert
-        elif (_type == 'confirm'):
+        elif _type == 'confirm':
             dialogType = Dialog.Type.Confirm
-        elif (_type == 'prompt'):
+        elif _type == 'prompt':
             dialogType = Dialog.Type.Prompt
-        elif (_type == 'beforeunload'):
+        elif _type == 'beforeunload':
             dialogType = Dialog.Type.BeforeUnload
         dialog = Dialog(self._client, dialogType, event.get('message'),
                         event.get('defaultPrompt'))
@@ -703,12 +794,12 @@ function deliverResult(name, seq, result) {
         """Go to the ``url``.
 
         :arg string url: URL to navigate page to. The url should include
-            scheme, e.g. ``https://``.
+                         scheme, e.g. ``https://``.
 
         Available options are:
 
         * ``timeout`` (int): Maximum navigation time in milliseconds, defaults
-          to 30 seconds, pass ``0`` to desable timeout. The default value can
+          to 30 seconds, pass ``0`` to disable timeout. The default value can
           be changed by using the :meth:`setDefaultNavigationTimeout` method.
         * ``waitUntil`` (str|List[str]): When to consider navigation succeeded,
           defaults to ``load``. Given a list of event strings, navigation is
@@ -721,6 +812,22 @@ function deliverResult(name, seq, result) {
             for at least 500 ms.
           * ``networkidle2``: when there are no more than 2 network connections
             for at least 500 ms.
+
+        The ``Page.goto`` will raise errors if:
+
+        * there's an SSL error (e.g. in case of self-signed certificates)
+        * target URL is invalid
+        * the ``timeout`` is exceeded during navigation
+        * then main resource failed to load
+
+        .. note::
+            :meth:`goto` either raise error or return a main resource response.
+            The only exceptions are navigation to ``about:blank`` or navigation
+            to the same URL with a different hash, which would succeed and
+            return ``None``.
+
+        .. note::
+            Headless mode doesn't support navigation to a PDF document.
         """
         options = merge_dict(options, kwargs)
         mainFrame = self._frameManager.mainFrame
@@ -730,9 +837,9 @@ function deliverResult(name, seq, result) {
         referrer = self._networkManager.extraHTTPHeaders().get('referer', '')
         requests: Dict[str, Request] = dict()
 
-        def set_request(request: Request) -> None:
-            if request.url not in requests:
-                requests[request.url] = request
+        def set_request(req: Request) -> None:
+            if req.url not in requests:
+                requests[req.url] = req
 
         eventListeners = [helper.addEventListener(
             self._networkManager,
@@ -754,7 +861,7 @@ function deliverResult(name, seq, result) {
         if error:
             raise error
 
-        request = requests.get(mainFrame.url)
+        request = requests.get(mainFrame._navigationURL)
         return request.response if request else None
 
     async def _navigate(self, url: str, referrer: str) -> Optional[str]:
@@ -785,15 +892,32 @@ function deliverResult(name, seq, result) {
 
         This returns :class:`~pyppeteer.network_manager.Response` when the page
         navigates to a new URL or reloads. It is useful for when you run code
-        which will indirectly cause the page to navigate.
+        which will indirectly cause the page to navigate. In case of navigation
+        to a different anchor or navigation due to
+        `History API <https://developer.mozilla.org/en-US/docs/Web/API/History_API>`_
+        usage, the navigation will return ``None``.
+
         Consider this example:
 
         .. code::
 
-            navigationPromise = page.waitForNavigation()
+            navigationPromise = async.ensure_future(page.waitForNavigation())
             await page.click('a.my-link')  # indirectly cause a navigation
             await navigationPromise  # wait until navigation finishes
-        """
+
+        or,
+
+        .. code::
+
+            await asyncio.wait([
+                page.click('a.my-link'),
+                page.waitForNavigation(),
+            ])
+
+        .. note::
+            Usage of the History API to change the URL is considered a
+            navigation.
+        """  # noqa: E501
         options = merge_dict(options, kwargs)
         mainFrame = self._frameManager.mainFrame
         if mainFrame is None:
@@ -815,6 +939,80 @@ function deliverResult(name, seq, result) {
 
         response = responses.get(self.url, None)
         return response
+
+    async def waitForRequest(self, urlOrPredicate: Union[str, Callable[[Request], bool]],  # noqa: E501
+                             options: Dict = None, **kwargs: Any) -> Request:
+        """Wait for request.
+
+        :arg urlOrPredicate: A URL or function to wait for.
+
+        This method accepts below options:
+
+        * ``timeout`` (int|float): Maximum wait time in milliseconds, defaults
+          to 30 seconds, pass ``0`` to disable the timeout.
+
+        Example:
+
+        .. code::
+
+            firstRequest = await page.waitForRequest('http://example.com/resource')
+            finalRequest = await page.waitForRequest(lambda req: req.url == 'http://example.com' and req.method == 'GET')
+            return firstRequest.url
+        """  # noqa: E501
+        options = merge_dict(options, kwargs)
+        timeout = options.get('timeout', 30000)
+
+        def predicate(request: Request) -> bool:
+            if isinstance(urlOrPredicate, str):
+                return urlOrPredicate == request.url
+            if callable(urlOrPredicate):
+                return bool(urlOrPredicate(request))
+            return False
+
+        return await helper.waitForEvent(
+            self._networkManager,
+            NetworkManager.Events.Request,
+            predicate,
+            timeout,
+            self._client._loop,
+        )
+
+    async def waitForResponse(self, urlOrPredicate: Union[str, Callable[[Response], bool]],  # noqa: E501
+                              options: Dict = None, **kwargs: Any) -> Response:
+        """Wait for response.
+
+        :arg urlOrPredicate: A URL or function to wait for.
+
+        This method accepts below options:
+
+        * ``timeout`` (int|float): Maximum wait time in milliseconds, defaults
+          to 30 seconds, pass ``0`` to disable the timeout.
+
+        Example:
+
+        .. code::
+
+            firstResponse = await page.waitForResponse('http://example.com/resource')
+            finalResponse = await page.waitForResponse(lambda res: res.url == 'http://example.com' and res.status == 200)
+            return finalResponse.ok
+        """  # noqa: E501
+        options = merge_dict(options, kwargs)
+        timeout = options.get('timeout', 30000)
+
+        def predicate(response: Response) -> bool:
+            if isinstance(urlOrPredicate, str):
+                return urlOrPredicate == response.url
+            if callable(urlOrPredicate):
+                return bool(urlOrPredicate(response))
+            return False
+
+        return await helper.waitForEvent(
+            self._networkManager,
+            NetworkManager.Events.Response,
+            predicate,
+            timeout,
+            self._client._loop,
+        )
 
     async def goBack(self, options: dict = None, **kwargs: Any
                      ) -> Optional[Response]:
@@ -966,7 +1164,7 @@ function deliverResult(name, seq, result) {
         This function would be invoked in one of the following scenarios:
 
         * whenever the page is navigated
-        * whenever the child frame is attached or navigated. Inthis case, the
+        * whenever the child frame is attached or navigated. In this case, the
           function is invoked in the context of the newly attached frame.
         """
         source = helper.evaluationString(pageFunction, *args)
@@ -982,7 +1180,8 @@ function deliverResult(name, seq, result) {
         await self._client.send('Network.setCacheDisabled',
                                 {'cacheDisabled': not enabled})
 
-    async def screenshot(self, options: dict = None, **kwargs: Any) -> bytes:
+    async def screenshot(self, options: dict = None, **kwargs: Any
+                         ) -> Union[bytes, str]:
         """Take a screen shot.
 
         The following options are available:
@@ -1005,6 +1204,8 @@ function deliverResult(name, seq, result) {
 
         * ``omitBackground`` (bool): Hide default white background and allow
           capturing screenshot with transparency.
+        * ``encoding`` (str): The encoding of the image, can be either
+          ``'base64'`` or ``'binary'``. Defaults to ``'binary'``.
         """
         options = merge_dict(options, kwargs)
         screenshotType = None
@@ -1025,7 +1226,8 @@ function deliverResult(name, seq, result) {
             screenshotType = 'png'
         return await self._screenshotTask(screenshotType, options)
 
-    async def _screenshotTask(self, format: str, options: dict) -> bytes:  # noqa: C901,E501
+    async def _screenshotTask(self, format: str, options: dict  # noqa: C901
+                              ) -> Union[bytes, str]:
         await self._client.send('Target.activateTarget', {
             'targetId': self._target._targetId,
         })
@@ -1072,7 +1274,10 @@ function deliverResult(name, seq, result) {
         if options.get('fullPage'):
             await self.setViewport(self._viewport)
 
-        buffer = base64.b64decode(result.get('data', b''))
+        if options.get('encoding') == 'base64':
+            buffer = result.get('data', b'')
+        else:
+            buffer = base64.b64decode(result.get('data', b''))
         _path = options.get('path')
         if _path:
             with open(_path, 'wb') as f:
@@ -1091,7 +1296,7 @@ function deliverResult(name, seq, result) {
         * ``headerTemplate`` (str): HTML template for the print header. Should
           be valid HTML markup with following classes.
 
-          * ``data``: formatted print date
+          * ``date``: formatted print date
           * ``title``: document title
           * ``url``: document location
           * ``pageNumber``: current page number
@@ -1104,7 +1309,7 @@ function deliverResult(name, seq, result) {
         * ``landscape`` (bool): Paper orientation. Defaults to ``False``.
         * ``pageRanges`` (string): Paper ranges to print, e.g., '1-5,8,11-13'.
           Defaults to empty string, which means all pages.
-        * ``foramt`` (str): Paper format. If set, takes prioprity over
+        * ``format`` (str): Paper format. If set, takes priority over
           ``width`` or ``height``. Defaults to ``Letter``.
         * ``width`` (str): Paper width, accepts values labeled with units.
         * ``height`` (str): Paper height, accepts values labeled with units.
@@ -1115,8 +1320,62 @@ function deliverResult(name, seq, result) {
           * ``bottom`` (str): Bottom margin, accepts values labeled with units.
           * ``left`` (str): Left margin, accepts values labeled with units.
 
-        :return bytes: Return generated PDF ``bytes`` object.
-        """
+        :return: Return generated PDF ``bytes`` object.
+
+        .. note::
+            Generating a pdf is currently only supported in headless mode.
+
+        :meth:`pdf` generates a pdf of the page with ``print`` css media. To
+        generate a pdf with ``screen`` media, call
+        ``page.emulateMedia('screen')`` before calling :meth:`pdf`.
+
+        .. note::
+            By default, :meth:`pdf` generates a pdf with modified colors for
+            printing. Use the ``--webkit-print-color-adjust`` property to force
+            rendering of exact colors.
+
+        .. code::
+
+            await page.emulateMedia('screen')
+            await page.pdf({'path': 'page.pdf'})
+
+        The ``width``, ``height``, and ``margin`` options accept values labeled
+        with units. Unlabeled values are treated as pixels.
+
+        A few examples:
+
+        - ``page.pdf({'width': 100})``: prints with width set to 100 pixels.
+        - ``page.pdf({'width': '100px'})``: prints with width set to 100 pixels.
+        - ``page.pdf({'width': '10cm'})``: prints with width set to 100 centimeters.
+
+        All available units are:
+
+        - ``px``: pixel
+        - ``in``: inch
+        - ``cm``: centimeter
+        - ``mm``: millimeter
+
+        The format options are:
+
+        - ``Letter``: 8.5in x 11in
+        - ``Legal``: 8.5in x 14in
+        - ``Tabloid``: 11in x 17in
+        - ``Ledger``: 17in x 11in
+        - ``A0``: 33.1in x 46.8in
+        - ``A1``: 23.4in x 33.1in
+        - ``A2``: 16.5in x 23.4in
+        - ``A3``: 11.7in x 16.5in
+        - ``A4``: 8.27in x 11.7in
+        - ``A5``: 5.83in x 8.27in
+        - ``A6``: 4.13in x 5.83in
+
+        .. note::
+            ``headerTemplate`` and ``footerTemplate`` markup have the following
+            limitations:
+
+            1. Script tags inside templates are not evaluated.
+            2. Page styles are not visible inside templates.
+        """  # noqa: E501
         options = merge_dict(options, kwargs)
         scale = options.get('scale', 1)
         displayHeaderFooter = bool(options.get('displayHeaderFooter'))
@@ -1177,14 +1436,38 @@ function deliverResult(name, seq, result) {
             raise PageError('no main frame.')
         return await frame.title()
 
-    async def close(self) -> None:
-        """Close this page."""
+    async def close(self, options: Dict = None, **kwargs: Any) -> None:
+        """Close this page.
+
+        Available options:
+
+        * ``runBeforeUnload`` (bool): Defaults to ``False``. Whether to run the
+          `before unload <https://developer.mozilla.org/en-US/docs/Web/Events/beforeunload>`_
+          page handlers.
+
+        By defaults, :meth:`close` **does not** run beforeunload handlers.
+
+        .. note::
+           If ``runBeforeUnload`` is passed as ``True``, a ``beforeunload``
+           dialog might be summoned and should be handled manually via page's
+           ``dialog`` event.
+        """  # noqa: E501
+        options = merge_dict(options, kwargs)
         conn = self._client._connection
         if conn is None:
             raise PageError('Protocol Error: Connectoin Closed. '
                             'Most likely the page has been closed.')
-        await conn.send('Target.closeTarget',
-                        {'targetId': self._target._targetId})
+        runBeforeUnload = bool(options.get('runBeforeUnload'))
+        if runBeforeUnload:
+            await self._client.send('Page.close')
+        else:
+            await conn.send('Target.closeTarget',
+                            {'targetId': self._target._targetId})
+            await self._target._isClosedPromise
+
+    def isClosed(self) -> bool:
+        """Indicate that the page has been closed."""
+        return self._closed
 
     @property
     def mouse(self) -> Mouse:
@@ -1284,7 +1567,7 @@ function deliverResult(name, seq, result) {
 
         Pyppeteer tries to automatically detect function or selector, but
         sometimes miss-detects. If not work as you expected, use
-        :meth:`waitForFunction` or :meth:`waitForSelector` dilectly.
+        :meth:`waitForFunction` or :meth:`waitForSelector` directly.
 
         :arg selectorOrFunctionOrTimeout: A selector, xpath, or function
                                           string, or timeout (milliseconds).
@@ -1306,7 +1589,7 @@ function deliverResult(name, seq, result) {
         """Wait until element which matches ``selector`` appears on page.
 
         Wait for the ``selector`` to appear in page. If at the moment of
-        callingthe method the ``selector`` already exists, the method will
+        calling the method the ``selector`` already exists, the method will
         return immediately. If the selector doesn't appear after the
         ``timeout`` milliseconds of waiting, the function will raise error.
 
@@ -1319,7 +1602,7 @@ function deliverResult(name, seq, result) {
         * ``visible`` (bool): Wait for element to be present in DOM and to be
           visible; i.e. to not have ``display: none`` or ``visibility: hidden``
           CSS properties. Defaults to ``False``.
-        * ``hidden`` (bool): Wait for eleemnt to not be found in the DOM or to
+        * ``hidden`` (bool): Wait for element to not be found in the DOM or to
           be hidden, i.e. have ``display: none`` or ``visibility: hidden`` CSS
           properties. Defaults to ``False``.
         * ``timeout`` (int|float): Maximum time to wait for in milliseconds.
@@ -1332,11 +1615,11 @@ function deliverResult(name, seq, result) {
 
     def waitForXPath(self, xpath: str, options: dict = None,
                      **kwargs: Any) -> Awaitable:
-        """Wait until eleemnt which matches ``xpath`` appears on page.
+        """Wait until element which matches ``xpath`` appears on page.
 
         Wait for the ``xpath`` to appear in page. If the moment of calling the
         method the ``xpath`` already exists, the method will return
-        immediately. If the xpath doesn't appear after ``timeout`` millisecons
+        immediately. If the xpath doesn't appear after ``timeout`` milliseconds
         of waiting, the function will raise exception.
 
 
@@ -1344,7 +1627,7 @@ function deliverResult(name, seq, result) {
         :return: Return awaitable object which resolves when element specified
                  by xpath string is added to DOM.
 
-        Avalaible options are:
+        Available options are:
 
         * ``visible`` (bool): wait for element to be present in DOM and to be
           visible, i.e. to not have ``display: none`` or ``visibility: hidden``
@@ -1353,7 +1636,7 @@ function deliverResult(name, seq, result) {
           be hidden, i.e. have ``display: none`` or ``visibility: hidden`` CSS
           properties. Defaults to ``False``.
         * ``timeout`` (int|float): maximum time to wait for in milliseconds.
-          Defaults to 30000 (30 seconds). Pass ``0`` to diable timeout.
+          Defaults to 30000 (30 seconds). Pass ``0`` to disable timeout.
         """
         frame = self.mainFrame
         if not frame:
@@ -1362,12 +1645,12 @@ function deliverResult(name, seq, result) {
 
     def waitForFunction(self, pageFunction: str, options: dict = None,
                         *args: str, **kwargs: Any) -> Awaitable:
-        """Wait until the function completes and returns a truethy value.
+        """Wait until the function completes and returns a truthy value.
 
         :arg Any args: Arguments to pass to ``pageFunction``.
         :return: Return awaitable object which resolves when the
-                 ``pageFunction`` returns a truethy value. It resolves to a
-                 :class:`~pyppeteer.execution_context.JSHandle` of the truethy
+                 ``pageFunction`` returns a truthy value. It resolves to a
+                 :class:`~pyppeteer.execution_context.JSHandle` of the truthy
                  value.
 
         This method accepts the following options:
@@ -1449,13 +1732,14 @@ class ConsoleMessage(object):
     ConsoleMessage objects are dispatched by page via the ``console`` event.
     """
 
-    def __init__(self, type: str, text: str, args: List[JSHandle]) -> None:
+    def __init__(self, type: str, text: str, args: List[JSHandle] = None
+                 ) -> None:
         #: (str) type of console message
         self._type = type
         #: (str) console message string
         self._text = text
         #: list of JSHandle
-        self._args = args
+        self._args = args if args is not None else []
 
     @property
     def type(self) -> str:
@@ -1473,5 +1757,13 @@ class ConsoleMessage(object):
         return self._args
 
 
-#: alias to :func:`create_page()`
-craete = Page.create
+async def craete(*args: Any, **kwargs: Any) -> Page:
+    """[Deprecated] miss-spelled function.
+
+    This function is undocumented and will be removed in future release.
+    """
+    logger.warning(
+        '`craete` function is deprecated and will be removed in future. '
+        'Use `Page.create` instead.'
+    )
+    return await Page.create(*args, **kwargs)

@@ -12,6 +12,24 @@ class Dialog(object):
     """Dialog class.
 
     Dialog objects are dispatched by page via the ``dialog`` event.
+
+    An example of using ``Dialog`` class:
+
+    .. code::
+
+        browser = await launch()
+        page = await browser.newPage()
+
+        async def close_dialog(dialog):
+            print(dialog.message)
+            await dialog.dismiss()
+            await browser.close()
+
+        page.on(
+            'dialog',
+            lambda dialog: asyncio.ensure_future(close_dialog(dialog))
+        )
+        await page.evaluate('() => alert("1")')
     """
 
     Type = SimpleNamespace(
@@ -27,7 +45,7 @@ class Dialog(object):
         self._type = type
         self._message = message
         self._handled = False
-        self._defalutValue = defaultValue
+        self._defaultValue = defaultValue
 
     @property
     def type(self) -> str:
@@ -48,7 +66,7 @@ class Dialog(object):
 
         If dialog is not prompt, return empty string (``''``).
         """
-        return self._defalutValue
+        return self._defaultValue
 
     async def accept(self, promptText: str = '') -> None:
         """Accept the dialog.
