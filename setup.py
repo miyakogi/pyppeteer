@@ -11,6 +11,7 @@ extra_args = {}
 if (3, 6) > sys.version_info >= (3, 5):
     in_dir = path.join(basedir, 'pyppeteer')
     out_dir = path.join(basedir, '.pyppeteer')
+    package_data = {"pyppeteer": ["py.typed"]}
     packages = ['pyppeteer']
     package_dir = {'pyppeteer': '.pyppeteer'}
     if not path.exists(out_dir):
@@ -28,6 +29,7 @@ if (3, 6) > sys.version_info >= (3, 5):
         else:
             raise Exception('Could not find package directory')
 else:
+    package_data = {"pyppeteer": ["py.typed"]}
     packages = ['pyppeteer']
     package_dir = {'pyppeteer': 'pyppeteer'}
 
@@ -65,6 +67,7 @@ setup(
     author_email='miyako.dev@gmail.com',
     url='https://github.com/miyakogi/pyppeteer',
 
+    package_data=package_data,
     packages=packages,
     package_dir=package_dir,
     include_package_data=True,
