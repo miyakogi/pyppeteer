@@ -1,6 +1,11 @@
 History
 =======
 
+## Version 0.0.27 (2019-04-18)
+
+* Fix less than symbol - @noblezilla
+
+
 ## Version 0.0.25 (2018-09-27)
 
 * Fix miss-spelled methods and functions
