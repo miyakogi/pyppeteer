@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import mimetypes
+import concurrent.futures
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 from typing import TYPE_CHECKING
@@ -27,8 +28,8 @@ from pyppeteer.frame_manager import Frame  # noqa: F401
 from pyppeteer.frame_manager import FrameManager
 from pyppeteer.helper import debugError
 from pyppeteer.input import Keyboard, Mouse, Touchscreen
-from pyppeteer.navigator_watcher import NavigatorWatcher
 from pyppeteer.network_manager import NetworkManager, Response, Request
+from pyppeteer.lifecycle_watcher import LifecycleWatcher
 from pyppeteer.tracing import Tracing
 from pyppeteer.util import merge_dict
 from pyppeteer.worker import Worker
@@ -95,7 +96,9 @@ class Page(EventEmitter):
                     screenshotTaskQueue)
 
         await asyncio.gather(
-            client.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': False}),  # noqa: E501
+            client.send('Target.setAutoAttach',
+                        {'autoAttach': True, 'waitForDebuggerOnStart': False}),
+            # noqa: E501
             client.send('Page.setLifecycleEventsEnabled', {'enabled': True}),
             client.send('Network.enable', {}),
             client.send('Runtime.enable', {}),
@@ -121,7 +124,7 @@ class Page(EventEmitter):
         self._mouse = Mouse(client, self._keyboard)
         self._touchscreen = Touchscreen(client, self._keyboard)
         self._frameManager = FrameManager(client, frameTree, self)
-        self._networkManager = NetworkManager(client, self._frameManager)
+        self._networkManager = self._frameManager.NetworkManager
         self._emulationManager = EmulationManager(client)
         self._tracing = Tracing(client)
         self._pageBindings: Dict[str, Callable[..., Any]] = dict()
@@ -467,7 +470,7 @@ class Page(EventEmitter):
         * ``sameSite`` (str): ``'Strict'`` or ``'Lax'``
         """
         if not urls:
-            urls = (self.url, )
+            urls = (self.url,)
         resp = await self._client.send('Network.getCookies', {
             'urls': urls,
         })
@@ -779,14 +782,47 @@ function addPageBinding(bindingName) {
             raise PageError('No main frame.')
         return await frame.content()
 
-    async def setContent(self, html: str) -> None:
+    async def setContent(self, html: str, options: dict = None,
+                         **kwargs: Any) -> None:
         """Set content to this page.
 
         :arg str html: HTML markup to assign to the page.
+
+          Available options are:
+
+        * ``timeout`` (int): Maximum navigation time in milliseconds, defaults
+          to 30 seconds, pass ``0`` to disable timeout. The default value can
+          be changed by using the :meth:`setDefaultNavigationTimeout` method.
+        * ``waitUntil`` (str|List[str]): When to consider navigation succeeded,
+          defaults to ``load``. Given a list of event strings, navigation is
+          considered to be successful after all events have been fired. Events
+          can be either:
+
+          * ``load``: when ``load`` event is fired.
+          * ``domcontentloaded``: when the ``DOMContentLoaded`` event is fired.
+          * ``networkidle0``: when there are no more than 0 network connections
+            for at least 500 ms.
+          * ``networkidle2``: when there are no more than 2 network connections
+            for at least 500 ms.
         """
+        options = merge_dict(options, kwargs)
         frame = self.mainFrame
         if frame is None:
             raise PageError('No main frame.')
+        timeout = options.get('timeout', self._defaultNavigationTimeout)
+        waitUntil = options.get('waitUntil', self._defaultNavigationTimeout)
+        if 'waitUntil' in options:
+            watcher = LifecycleWatcher(self._frameManager, frame, waitUntil,
+                                       timeout)
+            done, pending = await asyncio.wait([
+                watcher.timeoutOrTerminationPromise,
+                watcher.lifecyclePromise,
+            ], return_when=concurrent.futures.FIRST_COMPLETED)
+            watcher.dispose()
+            if watcher.timeoutOrTerminationPromise in done:
+                pending.pop().cancel()
+                raise done.pop().exception()
+
         await frame.setContent(html)
 
     async def goto(self, url: str, options: dict = None, **kwargs: Any
@@ -829,47 +865,59 @@ function addPageBinding(bindingName) {
         .. note::
             Headless mode doesn't support navigation to a PDF document.
         """
+
+        ensureNewDocumentNavigation = False
+
+        async def _navigate(url: str, referrer: str, frameid: str) \
+                -> Optional[str]:
+            nonlocal ensureNewDocumentNavigation
+            response = await self._client.send(
+                'Page.navigate',
+                {'url': url, 'referrer': referrer, "frameId": frame._id})
+            ensureNewDocumentNavigation = bool(response.get("loaderId"))
+            if response.get('errorText'):
+                return f'{response["errorText"]} at {url}'
+            return None
+
         options = merge_dict(options, kwargs)
-        mainFrame = self._frameManager.mainFrame
-        if mainFrame is None:
+        frame = self.mainFrame
+        if frame is None:
             raise PageError('No main frame.')
 
         referrer = self._networkManager.extraHTTPHeaders().get('referer', '')
-        requests: Dict[str, Request] = dict()
-
-        def set_request(req: Request) -> None:
-            if req.url not in requests:
-                requests[req.url] = req
-
-        eventListeners = [helper.addEventListener(
-            self._networkManager,
-            NetworkManager.Events.Request,
-            set_request,
-        )]
-
+        waitUntil = options.get("waitUntil", "load")
         timeout = options.get('timeout', self._defaultNavigationTimeout)
-        watcher = NavigatorWatcher(self._frameManager, mainFrame, timeout,
-                                   options)
+        watcher = LifecycleWatcher(self._frameManager, frame, waitUntil,
+                                   timeout)
+        navigate = asyncio.ensure_future(_navigate(url, referrer, frame._id))
 
-        result = await self._navigate(url, referrer)
-        if result is not None:
-            raise PageError(result)
-        result = await watcher.navigationPromise()
-        watcher.cancel()
-        helper.removeEventListeners(eventListeners)
-        error = result[0].pop().exception()  # type: ignore
+        done, pending = await asyncio.wait({
+            navigate, watcher.timeoutOrTerminationPromise,
+        }, return_when=concurrent.futures.FIRST_COMPLETED)
+        if navigate in done:
+            try:
+                error = done.pop().result()
+                if error:
+                    error = PageError(error)
+            except Exception as e:
+                error = e
+            if not error:
+                done, pending = await asyncio.wait({
+                    watcher.timeoutOrTerminationPromise,
+                    (watcher.newDocumentNavigationPromise
+                     if ensureNewDocumentNavigation
+                     else watcher.sameDocumentNavigationPromise)
+                }, return_when=concurrent.futures.FIRST_COMPLETED)
+                if watcher.timeoutOrTerminationPromise in done:
+                    pending.pop().cancel()
+                    error = done.pop().exception()
+        else:
+            pending.pop().cancel()
+            error = done.pop().exception()
+        watcher.dispose()
         if error:
             raise error
-
-        request = requests.get(mainFrame._navigationURL)
-        return request.response if request else None
-
-    async def _navigate(self, url: str, referrer: str) -> Optional[str]:
-        response = await self._client.send(
-            'Page.navigate', {'url': url, 'referrer': referrer})
-        if response.get('errorText'):
-            return f'{response["errorText"]} at {url}'
-        return None
+        return watcher.navigationResponse()
 
     async def reload(self, options: dict = None, **kwargs: Any
                      ) -> Optional[Response]:
@@ -923,24 +971,25 @@ function addPageBinding(bindingName) {
         if mainFrame is None:
             raise PageError('No main frame.')
         timeout = options.get('timeout', self._defaultNavigationTimeout)
-        watcher = NavigatorWatcher(self._frameManager, mainFrame, timeout,
-                                   options)
-        responses: Dict[str, Response] = dict()
-        listener = helper.addEventListener(
-            self._networkManager,
-            NetworkManager.Events.Response,
-            lambda response: responses.__setitem__(response.url, response)
-        )
-        result = await watcher.navigationPromise()
-        helper.removeEventListeners([listener])
-        error = result[0].pop().exception()
+        waitUntil = options.get("waitUntil", "load")
+        watcher = LifecycleWatcher(self._frameManager, mainFrame, waitUntil,
+                                   timeout)
+        done, pending = await asyncio.wait({
+            watcher.timeoutOrTerminationPromise,
+            watcher.sameDocumentNavigationPromise,
+            watcher.newDocumentNavigationPromise
+        }, return_when=concurrent.futures.FIRST_COMPLETED)
+        watcher.dispose()
+        error = done.pop().exception()
+        for task in pending:
+            task.cancel()
         if error:
             raise error
+        return watcher.navigationResponse()
 
-        response = responses.get(self.url, None)
-        return response
-
-    async def waitForRequest(self, urlOrPredicate: Union[str, Callable[[Request], bool]],  # noqa: E501
+    async def waitForRequest(self, urlOrPredicate: Union[
+        str, Callable[[Request], bool]],
+                             # noqa: E501
                              options: Dict = None, **kwargs: Any) -> Request:
         """Wait for request.
 
@@ -977,7 +1026,9 @@ function addPageBinding(bindingName) {
             self._client._loop,
         )
 
-    async def waitForResponse(self, urlOrPredicate: Union[str, Callable[[Response], bool]],  # noqa: E501
+    async def waitForResponse(self, urlOrPredicate: Union[
+        str, Callable[[Response], bool]],
+                              # noqa: E501
                               options: Dict = None, **kwargs: Any) -> Response:
         """Wait for response.
 
@@ -1394,14 +1445,20 @@ function addPageBinding(bindingName) {
             paperWidth = fmt['width']
             paperHeight = fmt['height']
         else:
-            paperWidth = convertPrintParameterToInches(options.get('width')) or paperWidth  # noqa: E501
-            paperHeight = convertPrintParameterToInches(options.get('height')) or paperHeight  # noqa: E501
+            paperWidth = convertPrintParameterToInches(
+                options.get('width')) or paperWidth  # noqa: E501
+            paperHeight = convertPrintParameterToInches(
+                options.get('height')) or paperHeight  # noqa: E501
 
         marginOptions = options.get('margin', {})
-        marginTop = convertPrintParameterToInches(marginOptions.get('top')) or 0  # noqa: E501
-        marginLeft = convertPrintParameterToInches(marginOptions.get('left')) or 0  # noqa: E501
-        marginBottom = convertPrintParameterToInches(marginOptions.get('bottom')) or 0  # noqa: E501
-        marginRight = convertPrintParameterToInches(marginOptions.get('right')) or 0  # noqa: E501
+        marginTop = convertPrintParameterToInches(
+            marginOptions.get('top')) or 0  # noqa: E501
+        marginLeft = convertPrintParameterToInches(
+            marginOptions.get('left')) or 0  # noqa: E501
+        marginBottom = convertPrintParameterToInches(
+            marginOptions.get('bottom')) or 0  # noqa: E501
+        marginRight = convertPrintParameterToInches(
+            marginOptions.get('right')) or 0  # noqa: E501
 
         result = await self._client.send('Page.printToPDF', dict(
             landscape=landscape,
@@ -1690,7 +1747,6 @@ supportedMetrics = (
     'JSHeapUsedSize',
     'JSHeapTotalSize',
 )
-
 
 unitToPixels = {
     'px': 1,

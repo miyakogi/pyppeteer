@@ -14,6 +14,7 @@ from pyee import EventEmitter
 
 from pyppeteer import helper
 from pyppeteer.connection import CDPSession
+from pyppeteer.network_manager import NetworkManager
 from pyppeteer.element_handle import ElementHandle
 from pyppeteer.errors import NetworkError
 from pyppeteer.execution_context import ExecutionContext, JSHandle
@@ -42,6 +43,7 @@ class FrameManager(EventEmitter):
         super().__init__()
         self._client = client
         self._page = page
+        self._networkmanager = NetworkManager(client, self)
         self._frames: OrderedDict[str, Frame] = OrderedDict()
         self._mainFrame: Optional[Frame] = None
         self._contextIdToContext: Dict[str, ExecutionContext] = dict()
@@ -224,6 +226,10 @@ class FrameManager(EventEmitter):
         frame._detach()
         self._frames.pop(frame._id, None)
         self.emit(FrameManager.Events.FrameDetached, frame)
+
+    @property
+    def NetworkManager(self):
+        return self._networkmanager
 
 
 class Frame(object):
@@ -699,7 +705,7 @@ function(html) {
         Details see :meth:`pyppeteer.page.Page.waitForFunction`.
         """
         options = merge_dict(options, kwargs)
-        timeout = options.get('timeout',  30000)  # msec
+        timeout = options.get('timeout', 30000)  # msec
         polling = options.get('polling', 'raf')
         return WaitTask(self, pageFunction, 'function', polling, timeout,
                         self._client._loop, *args)
@@ -763,8 +769,7 @@ function(html) {
         if name == 'init':
             self._loaderId = loaderId
             self._lifecycleEvents.clear()
-        else:
-            self._lifecycleEvents.add(name)
+        self._lifecycleEvents.add(name)
 
     def _onLoadingStopped(self) -> None:
         self._lifecycleEvents.add('DOMContentLoaded')

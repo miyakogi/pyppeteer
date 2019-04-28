@@ -918,6 +918,18 @@ class TestRequest(BaseTestCase):
 
 class TestQuerySelector(BaseTestCase):
     @sync
+    async def test_setcontent_waituntil(self):
+        await self.page.setContent(
+            '<img src="https://github.com/favicon.ico" />',
+            waitUntil='networkidle2')
+        outfile = Path(__file__).parent / 'setcontent_output.pdf'
+        await self.page.pdf({'path': str(outfile)})
+        self.assertTrue(outfile.is_file())
+        with outfile.open('rb') as f:
+            pdf = f.read()
+        self.assertGreater(len(pdf), 0)
+
+    @sync
     async def test_jeval(self):
         await self.page.setContent(
             '<section id="testAttribute">43543</section>')

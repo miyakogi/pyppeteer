@@ -17,7 +17,6 @@ from pyee import EventEmitter
 
 from pyppeteer.connection import CDPSession
 from pyppeteer.errors import NetworkError
-from pyppeteer.frame_manager import FrameManager, Frame
 from pyppeteer.helper import debugError
 from pyppeteer.multimap import Multimap
 
@@ -37,7 +36,7 @@ class NetworkManager(EventEmitter):
         RequestFinished='requestfinished',
     )
 
-    def __init__(self, client: CDPSession, frameManager: FrameManager) -> None:
+    def __init__(self, client: CDPSession, frameManager) -> None:
         """Make new NetworkManager."""
         super().__init__()
         self._client = client
@@ -54,8 +53,10 @@ class NetworkManager(EventEmitter):
         self._requestHashToInterceptionIds = Multimap()
 
         self._client.on('Network.requestWillBeSent', self._onRequestWillBeSent)
-        self._client.on('Network.requestIntercepted', self._onRequestIntercepted)  # noqa: E501
-        self._client.on('Network.requestServedFromCache', self._onRequestServedFromCache)  # noqa: #501
+        self._client.on('Network.requestIntercepted',
+                        self._onRequestIntercepted)  # noqa: E501
+        self._client.on('Network.requestServedFromCache',
+                        self._onRequestServedFromCache)  # noqa: #501
         self._client.on('Network.responseReceived', self._onResponseReceived)
         self._client.on('Network.loadingFinished', self._onLoadingFinished)
         self._client.on('Network.loadingFailed', self._onLoadingFailed)
@@ -356,7 +357,7 @@ class Request(object):
     def __init__(self, client: CDPSession, requestId: Optional[str],
                  interceptionId: str, isNavigationRequest: bool,
                  allowInterception: bool, url: str, resourceType: str,
-                 payload: dict, frame: Optional[Frame],
+                 payload: dict, frame,
                  redirectChain: List['Request']
                  ) -> None:
         self._client = client
@@ -422,7 +423,7 @@ class Request(object):
         return self._response
 
     @property
-    def frame(self) -> Optional[Frame]:
+    def frame(self):
         """Return a matching :class:`~pyppeteer.frame_manager.frame` object.
 
         Return ``None`` if navigating to error page.

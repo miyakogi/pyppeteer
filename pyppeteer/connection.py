@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from typing import Awaitable, Callable, Dict, Union, TYPE_CHECKING
 
 from pyee import EventEmitter
@@ -123,10 +124,9 @@ class Connection(EventEmitter):
             if session:
                 session._on_message(params.get('message'))
         elif method == 'Target.detachedFromTarget':
-            session = self._sessions.get(sessionId)
+            session = self._sessions.pop(sessionId, False)
             if session:
                 session._on_closed()
-                del self._sessions[sessionId]
         else:
             self.emit(method, params)
 
@@ -149,10 +149,12 @@ class Connection(EventEmitter):
             self._closeCallback = None
 
         for cb in self._callbacks.values():
-            cb.set_exception(_rewriteError(
-                cb.error,  # type: ignore
-                f'Protocol error {cb.method}: Target closed.',  # type: ignore
-            ))
+            if not cb.done():
+                cb.set_exception(_rewriteError(
+                    cb.error,  # type: ignore
+                    f'Protocol error {cb.method}: Target closed.',
+                    # type: ignore
+                ))
         self._callbacks.clear()
 
         for session in self._sessions.values():
@@ -195,6 +197,10 @@ class CDPSession(EventEmitter):
     `here <https://chromedevtools.github.io/devtools-protocol/>`_.
     """
 
+    Events = SimpleNamespace(
+        Disconnected='disconnected'
+    )
+
     def __init__(self, connection: Union[Connection, 'CDPSession'],
                  targetType: str, sessionId: str,
                  loop: asyncio.AbstractEventLoop) -> None:
@@ -236,22 +242,22 @@ class CDPSession(EventEmitter):
         except Exception as e:
             # The response from target might have been already dispatched
             if _id in self._callbacks:
-                del self._callbacks[_id]
-                _callback = self._callbacks[_id]
-                _callback.set_exception(_rewriteError(
-                    _callback.error,  # type: ignore
-                    e.args[0],
-                ))
+                _callback = self._callbacks.pop(_id, False)
+                if _callback and not _callback.done():
+                    _callback.set_exception(_rewriteError(
+                        _callback.error,  # type: ignore
+                        e.args[0],
+                    ))
         return callback
 
     def _on_message(self, msg: str) -> None:  # noqa: C901
         logger_session.debug(f'RECV: {msg}')
         obj = json.loads(msg)
         _id = obj.get('id')
+        _id = obj.get('id')
         if _id:
-            callback = self._callbacks.get(_id)
+            callback = self._callbacks.pop(_id, False)
             if callback:
-                del self._callbacks[_id]
                 if obj.get('error'):
                     callback.set_exception(_createProtocolError(
                         callback.error,  # type: ignore
@@ -270,10 +276,9 @@ class CDPSession(EventEmitter):
                     session._on_message(params.get('message'))
             elif obj.get('method') == 'Target.detachFromTarget':
                 sessionId = params.get('sessionId')
-                session = self._sessions.get(sessionId)
+                session = self._sessions.pop(sessionId, False)
                 if session:
                     session._on_closed()
-                    del self._sessions[sessionId]
             self.emit(obj.get('method'), obj.get('params'))
 
     async def detach(self) -> None:
@@ -289,10 +294,12 @@ class CDPSession(EventEmitter):
 
     def _on_closed(self) -> None:
         for cb in self._callbacks.values():
-            cb.set_exception(_rewriteError(
-                cb.error,  # type: ignore
-                f'Protocol error {cb.method}: Target closed.',  # type: ignore
-            ))
+            if not cb.done():
+                cb.set_exception(_rewriteError(
+                    cb.error,  # type: ignore
+                    f'Protocol error {cb.method}: Target closed.',
+                    # type: ignore
+                ))
         self._callbacks.clear()
         self._connection = None
 
