@@ -11,7 +11,7 @@ from pyppeteer.util import get_free_port
 
 from .server import get_application
 
-DEFAULT_OPTIONS = {'args': ['--no-sandbox'], 'executablePath': '/usr/local/chrome/chrome'}
+DEFAULT_OPTIONS = {'args': ['--no-sandbox']}
 
 
 class BaseTestCase(unittest.TestCase):
