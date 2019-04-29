@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """Browser module."""
-
+import asyncio
 import logging
+import contextlib
 from subprocess import Popen
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -11,9 +12,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from pyee import EventEmitter
 
 from pyppeteer.connection import Connection
-from pyppeteer.errors import BrowserError
+from pyppeteer.errors import BrowserError, TimeoutError
 from pyppeteer.page import Page
 from pyppeteer.target import Target
+from pyppeteer.util import merge_dict
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +57,11 @@ class Browser(EventEmitter):
         else:
             self._closeCallback = _dummy_callback
 
-        self._defaultContext = BrowserContext(self, None)
+        self._defaultContext = BrowserContext(self._connection, self, None)
         self._contexts: Dict[str, BrowserContext] = dict()
         for contextId in contextIds:
-            self._contexts[contextId] = BrowserContext(self, contextId)
+            self._contexts[contextId] = BrowserContext(self._connection, self,
+                                                       contextId)
 
         self._targets: Dict[str, Target] = dict()
         self._connection.setClosedCallback(
@@ -66,7 +69,8 @@ class Browser(EventEmitter):
         )
         self._connection.on('Target.targetCreated', self._targetCreated)
         self._connection.on('Target.targetDestroyed', self._targetDestroyed)
-        self._connection.on('Target.targetInfoChanged', self._targetInfoChanged)  # noqa: E501
+        self._connection.on('Target.targetInfoChanged',
+                            self._targetInfoChanged)  # noqa: E501
 
     @property
     def process(self) -> Optional[Popen]:
@@ -106,7 +110,8 @@ class Browser(EventEmitter):
         """
         obj = await self._connection.send('Target.createBrowserContext')
         browserContextId = obj['browserContextId']
-        context = BrowserContext(self, browserContextId)  # noqa: E501
+        context = BrowserContext(self._connection, self,
+                                 browserContextId)  # noqa: E501
         self._contexts[browserContextId] = context
         return context
 
@@ -117,7 +122,8 @@ class Browser(EventEmitter):
         In a newly created browser, this will return a single instance of
         ``[BrowserContext]``
         """
-        return [self._defaultContext] + [context for context in self._contexts.values()]  # noqa: E501
+        return [self._defaultContext] + [context for context in
+                                         self._contexts.values()]  # noqa: E501
 
     async def _disposeContext(self, contextId: str) -> None:
         await self._connection.send('Target.disposeBrowserContext', {
@@ -168,7 +174,8 @@ class Browser(EventEmitter):
         target._closedCallback()
         if await target._initializedPromise:
             self.emit(Browser.Events.TargetDestroyed, target)
-            target.browserContext.emit(BrowserContext.Events.TargetDestroyed, target)  # noqa: E501
+            target.browserContext.emit(BrowserContext.Events.TargetDestroyed,
+                                       target)  # noqa: E501
         target._initializedCallback(False)
 
     async def _targetInfoChanged(self, event: Dict) -> None:
@@ -180,7 +187,8 @@ class Browser(EventEmitter):
         target._targetInfoChanged(event['targetInfo'])
         if wasInitialized and previousURL != target.url:
             self.emit(Browser.Events.TargetChanged, target)
-            target.browserContext.emit(BrowserContext.Events.TargetChanged, target)  # noqa: E501
+            target.browserContext.emit(BrowserContext.Events.TargetChanged,
+                                       target)  # noqa: E501
 
     @property
     def wsEndpoint(self) -> str:
@@ -217,19 +225,43 @@ class Browser(EventEmitter):
         return [target for target in self._targets.values()
                 if target._isInitialized]
 
+    def target(self) -> Target:
+        return next(filter(lambda x: x.type == 'browser', self.targets()))
+
+    async def waitForTarget(self, predicate, options=None, **kwargs):
+        options = merge_dict(options, kwargs)
+        timeout = options.get("timeout", 30000)
+        with contextlib.suppress(StopIteration):
+            return next(filter(lambda u: u == predicate, self.targets()))
+        resolve = self._connection._loop.create_future()
+
+        def check(target):
+            if predicate(target):
+                resolve.set_result(target)
+
+        self.on(Browser.Events.TargetCreated, check)
+        self.on(Browser.Events.TargetChanged, check)
+        try:
+            if timeout:
+                return await asyncio.wait_for(resolve, timeout=timeout)
+            return await resolve
+        except asyncio.TimeoutError:
+            raise TimeoutError("waiting for target target: "
+                               f"timeout {timeout * 1000}ms exceeded") from None
+        finally:
+            self.remove_listener(Browser.Events.TargetCreated, check)
+            self.remove_listener(Browser.Events.TargetChanged, check)
+
     async def pages(self) -> List[Page]:
         """Get all pages of this browser.
 
         Non visible pages, such as ``"background_page"``, will not be listed
         here. You can find then using :meth:`pyppeteer.target.Target.page`.
         """
-        pages = []
-        for target in self.targets():
-            if target.type == 'page':
-                page = await target.page()
-                if page:
-                    pages.append(page)
-        return pages
+        return await asyncio.gather(
+            *(target.page() for target in
+              filter(lambda x: x.type == 'page', self.targets()))
+        )
 
     async def version(self) -> str:
         """Get version of the browser."""
@@ -290,8 +322,10 @@ class BrowserContext(EventEmitter):
         TargetChanged='targetchanged',
     )
 
-    def __init__(self, browser: Browser, contextId: Optional[str]) -> None:
+    def __init__(self, connection: Connection, browser: Browser,
+                 contextId: Optional[str]) -> None:
         super().__init__()
+        self._connection = connection
         self._browser = browser
         self._id = contextId
 
@@ -302,6 +336,10 @@ class BrowserContext(EventEmitter):
             if target.browserContext == self:
                 targets.append(target)
         return targets
+
+    def waitForTarget(self, predicate, options):
+        return self._browser.waitForTarget(lambda target: predicate(
+            target) if target.browserContext() else None, options)
 
     def isIncognite(self) -> bool:
         """[Deprecated] Miss spelled method.
@@ -324,6 +362,26 @@ class BrowserContext(EventEmitter):
         """
         return bool(self._id)
 
+    async def overridePermissions(self, origin: str,
+                                  permissions: List[str]) -> None:
+        """An array of permissions to grant.
+
+        All permissions that are not listed here will be automatically denied.
+
+        Permissions can be one of the following values:"""
+        permissions = list(
+            map(lambda x: WebPermissionToProtocol[x], permissions))
+        await self._connection.send('Browser.grantPermissions', {
+            "origin": origin, "permissions": permissions,
+            "browserContextId": self._id if self._id else None
+        })
+
+    async def clearPermissionOverrides(self) -> None:
+        """clear Permission set"""
+        await self._connection.send("Browser.resetPermissions", {
+            "browserContextId": self._id if self._id else None
+        })
+
     async def newPage(self) -> Page:
         """Create a new page in the browser context."""
         return await self._browser._createPageInContext(self._id)
@@ -344,3 +402,20 @@ class BrowserContext(EventEmitter):
         if self._id is None:
             raise BrowserError('Non-incognito profile cannot be closed')
         await self._browser._disposeContext(self._id)
+
+
+WebPermissionToProtocol = {'geolocation': 'geolocation',
+                           'midi': 'midi',
+                           'notifications': 'notifications',
+                           'push': 'push', 'camera': 'videoCapture',
+                           'microphone': 'audioCapture',
+                           'background-sync': 'backgroundSync',
+                           'ambient-light-sensor': 'sensors',
+                           'accelerometer': 'sensors',
+                           'gyroscope': 'sensors',
+                           'magnetometer': 'sensors',
+                           'accessibility-events': 'accessibilityEvents',
+                           'clipboard-read': 'clipboardRead',
+                           'clipboard-write': 'clipboardWrite',
+                           'payment-handler': 'paymentHandler',
+                           'midi-sysex': 'midiSysex'}

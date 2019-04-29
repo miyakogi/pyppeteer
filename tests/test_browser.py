@@ -27,6 +27,35 @@ class TestBrowser(unittest.TestCase):
     }
 
     @sync
+    async def test_wait_for_target_url(self):
+        browser = await launch(DEFAULT_OPTIONS)
+        page = await browser.newPage()
+        await page.evaluate("() => window.open('https://www.example.com/')")
+        try:
+            await browser.waitForTarget(
+                lambda x: x.url == 'https://www.example.com/', timeout=5)
+        except TimeoutError:
+            self.fail("waitForTarget() raised ExceptionType unexpectedly!")
+        finally:
+            await page.close()
+            await browser.close()
+
+    @sync
+    async def test_wait_for_target_url(self):
+        browser = await launch(DEFAULT_OPTIONS)
+        page = await browser.newPage()
+        await page.evaluate("() => window.open('https://www.example.com/')")
+        try:
+            await browser.waitForTarget(
+                lambda x: x.url == 'https://www.example.com/', timeout=5)
+        except TimeoutError:
+            self.fail("waitForTarget() raised ExceptionType unexpectedly!")
+        finally:
+            await page.close()
+            await browser.close()
+
+
+    @sync
     async def test_browser_process(self):
         browser = await launch(DEFAULT_OPTIONS)
         process = browser.process
@@ -102,7 +131,8 @@ class TestBrowser(unittest.TestCase):
         browser = await launch(self.extensionOptions)
         page = await browser.newPage()
         targets = browser.targets()
-        backgroundPageTargets = [t for t in targets if t.type == 'background_page']  # noqa: E501
+        backgroundPageTargets = [t for t in targets if
+                                 t.type == 'background_page']  # noqa: E501
         await page.close()
         await browser.close()
         self.assertTrue(backgroundPageTargets)
