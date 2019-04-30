@@ -71,8 +71,9 @@ def download_zip(url: str) -> BytesIO:
     # disable warnings so that we don't need a cert.
     # see https://urllib3.readthedocs.io/en/latest/advanced-usage.html for more
     urllib3.disable_warnings()
-
-    with urllib3.PoolManager() as http:
+    proxy = os.getenv('https_proxy', '') or os.getenv('http_proxy', '')
+    with urllib3.ProxyManager(
+            proxy) if proxy else urllib3.PoolManager() as http:
         # Get data from url.
         # set preload_content=False means using stream later.
         data = http.request('GET', url, preload_content=False)
