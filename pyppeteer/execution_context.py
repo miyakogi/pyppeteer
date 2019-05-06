@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from pyppeteer import helper
 from pyppeteer.connection import CDPSession
+from pyppeteer.jshandle import createJSHandle, JSHandle
 from pyppeteer.errors import ElementHandleError, NetworkError
 from pyppeteer.helper import debugError
 
@@ -94,7 +95,7 @@ class ExecutionContext(object):
                     'Evaluation failed: {}'.format(
                         helper.getExceptionMessage(exceptionDetails)))
             remoteObject = _obj.get('result')
-            return self._objectHandleFactory(remoteObject)
+            return createJSHandle(self, remoteObject)
 
         try:
             _obj = await self._client.send('Runtime.callFunctionOn', {
@@ -113,7 +114,7 @@ class ExecutionContext(object):
             raise ElementHandleError('Evaluation failed: {}'.format(
                 helper.getExceptionMessage(exceptionDetails)))
         remoteObject = _obj.get('result')
-        return self._objectHandleFactory(remoteObject)
+        return createJSHandle(self, remoteObject)
 
     def _convertArgument(self, arg: Any) -> Dict:  # noqa: C901
         if arg == math.inf:
@@ -146,90 +147,7 @@ class ExecutionContext(object):
         response = await self._client.send('Runtime.queryObjects', {
             'prototypeObjectId': prototypeHandle._remoteObject['objectId'],
         })
-        return self._objectHandleFactory(response.get('objects'))
-
-
-class JSHandle(object):
-    """JSHandle class.
-
-    JSHandle represents an in-page JavaScript object. JSHandle can be created
-    with the :meth:`~pyppeteer.page.Page.evaluateHandle` method.
-    """
-
-    def __init__(self, context: ExecutionContext, client: CDPSession,
-                 remoteObject: Dict) -> None:
-        self._context = context
-        self._client = client
-        self._remoteObject = remoteObject
-        self._disposed = False
-
-    @property
-    def executionContext(self) -> ExecutionContext:
-        """Get execution context of this handle."""
-        return self._context
-
-    async def getProperty(self, propertyName: str) -> 'JSHandle':
-        """Get property value of ``propertyName``."""
-        objectHandle = await self._context.evaluateHandle(
-            '''(object, propertyName) => {
-                const result = {__proto__: null};
-                result[propertyName] = object[propertyName];
-                return result;
-            }''', self, propertyName)
-        properties = await objectHandle.getProperties()
-        result = properties[propertyName]
-        await objectHandle.dispose()
-        return result
-
-    async def getProperties(self) -> Dict[str, 'JSHandle']:
-        """Get all properties of this handle."""
-        response = await self._client.send('Runtime.getProperties', {
-            'objectId': self._remoteObject.get('objectId', ''),
-            'ownProperties': True,
-        })
-        result = dict()
-        for prop in response['result']:
-            if not prop.get('enumerable'):
-                continue
-            result[prop.get('name')] = self._context._objectHandleFactory(
-                prop.get('value'))
-        return result
-
-    async def jsonValue(self) -> Dict:
-        """Get Jsonized value of this object."""
-        objectId = self._remoteObject.get('objectId')
-        if objectId:
-            response = await self._client.send('Runtime.callFunctionOn', {
-                'functionDeclaration': 'function() { return this; }',
-                'objectId': objectId,
-                'returnByValue': True,
-                'awaitPromise': True,
-            })
-            return helper.valueFromRemoteObject(response['result'])
-        return helper.valueFromRemoteObject(self._remoteObject)
-
-    def asElement(self) -> Optional['ElementHandle']:
-        """Return either null or the object handle itself."""
-        return None
-
-    async def dispose(self) -> None:
-        """Stop referencing the handle."""
-        if self._disposed:
-            return
-        self._disposed = True
-        try:
-            await helper.releaseObject(self._client, self._remoteObject)
-        except Exception as e:
-            debugError(logger, e)
-
-    def toString(self) -> str:
-        """Get string representation."""
-        if self._remoteObject.get('objectId'):
-            _type = (self._remoteObject.get('subtype') or
-                     self._remoteObject.get('type'))
-            return f'JSHandle@{_type}'
-        return 'JSHandle:{}'.format(
-            helper.valueFromRemoteObject(self._remoteObject))
+        return createJSHandle(self, response.get('objects'))
 
 
 def _rewriteError(error: Exception) -> None:

@@ -17,7 +17,8 @@ from pyppeteer.connection import CDPSession
 from pyppeteer.network_manager import NetworkManager
 from pyppeteer.element_handle import ElementHandle
 from pyppeteer.errors import NetworkError
-from pyppeteer.execution_context import ExecutionContext, JSHandle
+from pyppeteer.execution_context import ExecutionContext
+from pyppeteer.jshandle import JSHandle, ElementHandle, createJSHandle
 from pyppeteer.errors import ElementHandleError, PageError, TimeoutError
 from pyppeteer.util import merge_dict
 

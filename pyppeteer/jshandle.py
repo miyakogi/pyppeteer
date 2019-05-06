@@ -1,25 +1,109 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""Element handle module."""
-
 import copy
-import logging
 import math
+import logging
 import os.path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from pyppeteer.connection import CDPSession
-from pyppeteer.execution_context import ExecutionContext, JSHandle
 from pyppeteer.errors import ElementHandleError, NetworkError
-from pyppeteer.helper import debugError
 from pyppeteer.util import merge_dict
-
-if TYPE_CHECKING:
-    from pyppeteer.frame_manager import Frame, FrameManager  # noqa: F401
-
+from pyppeteer import helper
+from pyppeteer.helper import debugError
 
 logger = logging.getLogger(__name__)
+
+
+def createJSHandle(context, remoteObject) -> "JSHandle":
+    """Create JS handle associated to the context id and remote object."""
+
+    frame = context.frame
+    if remoteObject.get("subtype", "") == 'node' and frame:
+        frameManager = frame._frameManager
+        return ElementHandle(context, context._client, remoteObject,
+                             frameManager._page, frameManager)
+    return JSHandle(context, context._client, remoteObject)
+
+
+class JSHandle(object):
+    """JSHandle class.
+
+    JSHandle represents an in-page JavaScript object. JSHandle can be created
+    with the :meth:`~pyppeteer.page.Page.evaluateHandle` method.
+    """
+
+    def __init__(self, context, client, remoteObject: Dict) -> None:
+        self._context = context
+        self._client = client
+        self._remoteObject = remoteObject
+        self._disposed = False
+
+    @property
+    def executionContext(self):
+        """Get execution context of this handle."""
+        return self._context
+
+    async def getProperty(self, propertyName: str) -> 'JSHandle':
+        """Get property value of ``propertyName``."""
+        objectHandle = await self._context.evaluateHandle(
+            '''(object, propertyName) => {
+                const result = {__proto__: null};
+                result[propertyName] = object[propertyName];
+                return result;
+            }''', self, propertyName)
+        properties = await objectHandle.getProperties()
+        result = properties[propertyName]
+        await objectHandle.dispose()
+        return result
+
+    async def getProperties(self) -> Dict[str, 'JSHandle']:
+        """Get all properties of this handle."""
+        response = await self._client.send('Runtime.getProperties', {
+            'objectId': self._remoteObject.get('objectId', ''),
+            'ownProperties': True,
+        })
+        result = dict()
+        for prop in response['result']:
+            if not prop.get('enumerable'):
+                continue
+            result[prop.get('name')] = createJSHandle(self._context,
+                                                      prop.get('value'))
+        return result
+
+    async def jsonValue(self) -> Dict:
+        """Get Jsonized value of this object."""
+        objectId = self._remoteObject.get('objectId')
+        if objectId:
+            response = await self._client.send('Runtime.callFunctionOn', {
+                'functionDeclaration': 'function() { return this; }',
+                'objectId': objectId,
+                'returnByValue': True,
+                'awaitPromise': True,
+            })
+            return helper.valueFromRemoteObject(response['result'])
+        return helper.valueFromRemoteObject(self._remoteObject)
+
+    def asElement(self) -> Optional['ElementHandle']:
+        """Return either null or the object handle itself."""
+        return None
+
+    async def dispose(self) -> None:
+        """Stop referencing the handle."""
+        if self._disposed:
+            return
+        self._disposed = True
+        try:
+            await helper.releaseObject(self._client, self._remoteObject)
+        except Exception as e:
+            debugError(logger, e)
+
+    def toString(self) -> str:
+        """Get string representation."""
+        if self._remoteObject.get('objectId'):
+            _type = (self._remoteObject.get('subtype') or
+                     self._remoteObject.get('type'))
+            return f'JSHandle@{_type}'
+        return 'JSHandle:{}'.format(
+            helper.valueFromRemoteObject(self._remoteObject))
 
 
 class ElementHandle(JSHandle):
@@ -37,9 +121,9 @@ class ElementHandle(JSHandle):
     :meth:`pyppeteer.page.Page.evaluate` methods.
     """
 
-    def __init__(self, context: ExecutionContext, client: CDPSession,
+    def __init__(self, context, client: CDPSession,
                  remoteObject: dict, page: Any,
-                 frameManager: 'FrameManager') -> None:
+                 frameManager) -> None:
         super().__init__(context, client, remoteObject)
         self._client = client
         self._remoteObject = remoteObject
@@ -51,7 +135,7 @@ class ElementHandle(JSHandle):
         """Return this ElementHandle."""
         return self
 
-    async def contentFrame(self) -> Optional['Frame']:
+    async def contentFrame(self):
         """Return the content frame for the element handle.
 
         Return ``None`` if this handle is not referencing iframe.
@@ -433,7 +517,8 @@ class ElementHandle(JSHandle):
             assert (await feedHandle.JJeval('.tweet', '(nodes => nodes.map(n => n.innerText))')) == ['Hello!', 'Hi!']
         """  # noqa: E501
         arrayHandle = await self.executionContext.evaluateHandle(
-            '(element, selector) => Array.from(element.querySelectorAll(selector))',  # noqa: E501
+            '(element, selector) => Array.from(element.querySelectorAll(selector))',
+            # noqa: E501
             self, selector
         )
         result = await self.executionContext.evaluate(

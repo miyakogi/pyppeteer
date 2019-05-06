@@ -20,7 +20,7 @@ from pyppeteer import helper
 from pyppeteer.connection import CDPSession
 from pyppeteer.coverage import Coverage
 from pyppeteer.dialog import Dialog
-from pyppeteer.element_handle import ElementHandle
+from pyppeteer.jshandle import ElementHandle, createJSHandle
 from pyppeteer.emulation_manager import EmulationManager
 from pyppeteer.errors import PageError
 from pyppeteer.execution_context import JSHandle  # noqa: F401
