@@ -38,6 +38,7 @@ class LifecycleWatcher:
             self._expectedLifecycle.append(protocolEvent)
 
         self._maximumTimer = None
+        self._timeoutOrTermination = None
         self._frameManager = frameManager
         self._loop = self._frameManager._client._loop
         self._frame = frame
@@ -62,8 +63,8 @@ class LifecycleWatcher:
             helper.addEventListener(self._frameManager.NetworkManager,
                                     NetworkManager.Events.Request,
                                     self._onRequest),
-        ]
 
+        ]
         self._timeoutPromise = self._createTimeoutPromise()
         self._sameDocumentNavigationPromise = self._loop.create_future()
         self._lifecyclePromise = self._loop.create_future()
@@ -89,11 +90,11 @@ class LifecycleWatcher:
         self._navigationRequest = request
 
     def _onFrameDetached(self, frame: Frame = None):
-        if self._frame != frame:
+        if self._frame == frame:
             self._terminationPromise.set_exception(
                 NetworkError("Navigating frame was detached"))
-            return
-        self._checkLifecycleComplete()
+        else:
+            self._checkLifecycleComplete()
 
     def navigationResponse(self):
         if self._navigationRequest:
@@ -101,15 +102,24 @@ class LifecycleWatcher:
 
     @property
     def timeoutOrTerminationPromise(self):
-        return asyncio.ensure_future(self._timeoutOrTermination)
+        if asyncio.iscoroutine(self._timeoutOrTermination):
+            self._timeoutOrTermination.cancel()
+        self._timeoutOrTermination = self._loop.create_future()
 
-    @property
-    async def _timeoutOrTermination(self):
-        done, pending = await asyncio.wait({
-            self._timeoutPromise,
-            self._terminationPromise,
-        }, return_when=concurrent.futures.FIRST_COMPLETED)
-        raise done.pop().exception()
+        async def _timeoutOrTermination():
+            done, pending = await asyncio.wait([
+                self._timeoutPromise,
+                self._terminationPromise,
+            ], return_when=concurrent.futures.FIRST_COMPLETED)
+            error = done.pop()
+            if error.exception():
+                self._timeoutOrTermination.set_exception(
+                    error.exception())
+
+        task = self._loop.create_task(_timeoutOrTermination())
+        self._timeoutOrTermination.add_done_callback(
+            lambda x: task.cancel())
+        return self._timeoutOrTermination
 
     def _createTimeoutPromise(self) -> Awaitable[None]:
         self._maximumTimer = self._loop.create_future()
