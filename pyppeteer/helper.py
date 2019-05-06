@@ -12,7 +12,6 @@ from typing import Any, Awaitable, Callable, Dict, List
 from pyee import AsyncIOEventEmitter
 
 import pyppeteer
-from pyppeteer.connection import CDPSession
 from pyppeteer.errors import ElementHandleError, TimeoutError
 
 logger = logging.getLogger(__name__)
@@ -100,7 +99,7 @@ def valueFromRemoteObject(remoteObject: Dict) -> Any:
     return remoteObject.get('value')
 
 
-def releaseObject(client: CDPSession, remoteObject: dict
+def releaseObject(client, remoteObject: dict
                   ) -> Awaitable:
     """Release remote object."""
     objectId = remoteObject.get('objectId')
