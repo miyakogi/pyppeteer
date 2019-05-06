@@ -39,22 +39,24 @@ CHROME_PROFILE_PATH = pyppeteer_home / '.dev_profile'
 
 DEFAULT_ARGS = [
     '--disable-background-networking',
+    '--enable-features=NetworkService,NetworkServiceInProcess',
     '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
     '--disable-breakpad',
-    '--disable-browser-side-navigation',
     '--disable-client-side-phishing-detection',
     '--disable-default-apps',
     '--disable-dev-shm-usage',
     '--disable-extensions',
-    '--disable-features=site-per-process',
+    '--disable-features=site-per-process,TranslateUI,BlinkGenPropertyTrees',
     '--disable-hang-monitor',
+    '--disable-ipc-flooding-protection',
     '--disable-popup-blocking',
     '--disable-prompt-on-repost',
+    '--disable-renderer-backgrounding',
     '--disable-sync',
-    '--disable-translate',
+    '--force-color-profile=srgb',
     '--metrics-recording-only',
-    '--no-first-run',
-    '--safebrowsing-disable-auto-update',
+    '--no-first-run'
 ]
 
 AUTOMATION_ARGS = [
@@ -102,7 +104,6 @@ class Launcher(object):
         if 'headless' not in self.options or self.options.get('headless'):
             self.chrome_args.extend([
                 '--headless',
-                '--disable-gpu',
                 '--hide-scrollbars',
                 '--mute-audio',
             ])
