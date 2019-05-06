@@ -131,6 +131,7 @@ class Page(AsyncIOEventEmitter):
         self._ignoreHTTPSErrors = ignoreHTTPSErrors
         self._defaultNavigationTimeout = 30000  # milliseconds
         self._coverage = Coverage(client)
+        self._pageCrashedPromise = self._client._loop.create_future()
 
         if screenshotTaskQueue is None:
             screenshotTaskQueue = list()
@@ -227,7 +228,12 @@ class Page(AsyncIOEventEmitter):
         """Get the browser the page belongs to."""
         return self._target.browser
 
+    @property
+    def _pageCrashed(self):
+        return asyncio.shield(self._pageCrashedPromise)
+
     def _onTargetCrashed(self, *args: Any, **kwargs: Any) -> None:
+        self._pageCrashedPromise.set_exception(PageError('Page crashed!'))
         self.emit('error', PageError('Page crashed!'))
 
     def _onLogEntryAdded(self, event: Dict) -> None:
@@ -817,6 +823,7 @@ function addPageBinding(bindingName) {
             done, pending = await asyncio.wait([
                 watcher.timeoutOrTerminationPromise,
                 watcher.lifecyclePromise,
+                self._pageCrashed
             ], return_when=concurrent.futures.FIRST_COMPLETED)
             watcher.dispose()
             if watcher.timeoutOrTerminationPromise in done:
@@ -906,7 +913,8 @@ function addPageBinding(bindingName) {
                     watcher.timeoutOrTerminationPromise,
                     (watcher.newDocumentNavigationPromise
                      if ensureNewDocumentNavigation
-                     else watcher.sameDocumentNavigationPromise)
+                     else watcher.sameDocumentNavigationPromise),
+                    self._pageCrashed
                 }, return_when=concurrent.futures.FIRST_COMPLETED)
                 if watcher.timeoutOrTerminationPromise in done:
                     pending.pop().cancel()
@@ -977,7 +985,8 @@ function addPageBinding(bindingName) {
         done, pending = await asyncio.wait({
             watcher.timeoutOrTerminationPromise,
             watcher.sameDocumentNavigationPromise,
-            watcher.newDocumentNavigationPromise
+            watcher.newDocumentNavigationPromise,
+            self._pageCrashed
         }, return_when=concurrent.futures.FIRST_COMPLETED)
         watcher.dispose()
         error = done.pop().exception()
@@ -1521,6 +1530,7 @@ function addPageBinding(bindingName) {
             await conn.send('Target.closeTarget',
                             {'targetId': self._target._targetId})
             await self._target._isClosedPromise
+        self._pageCrashedPromise.cancel()
 
     def isClosed(self) -> bool:
         """Indicate that the page has been closed."""
