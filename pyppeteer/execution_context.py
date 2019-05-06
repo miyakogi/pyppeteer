@@ -12,10 +12,9 @@ from pyppeteer import helper
 from pyppeteer.connection import CDPSession
 from pyppeteer.jshandle import createJSHandle, JSHandle
 from pyppeteer.errors import ElementHandleError, NetworkError
-from pyppeteer.helper import debugError
+
 
 if TYPE_CHECKING:
-    from pyppeteer.element_handle import ElementHandle  # noqa: F401
     from pyppeteer.frame_manager import Frame  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,7 @@ class ExecutionContext(object):
     """Execution Context class."""
 
     def __init__(self, client: CDPSession, contextPayload: Dict,
-                 objectHandleFactory: Any, frame: 'Frame' = None) -> None:
+                 frame: 'Frame' = None) -> None:
         self._client = client
         self._frame = frame
         self._contextId = contextPayload.get('id')
@@ -39,7 +38,6 @@ class ExecutionContext(object):
         auxData = contextPayload.get('auxData', {'isDefault': True})
         self._frameId = auxData.get('frameId', None)
         self._isDefault = bool(auxData.get('isDefault'))
-        self._objectHandleFactory = objectHandleFactory
 
     @property
     def frame(self) -> Optional['Frame']:
@@ -124,11 +122,13 @@ class ExecutionContext(object):
         objectHandle = arg if isinstance(arg, JSHandle) else None
         if objectHandle:
             if objectHandle._context != self:
-                raise ElementHandleError('JSHandles can be evaluated only in the context they were created!')  # noqa: E501
+                raise ElementHandleError(
+                    'JSHandles can be evaluated only in the context they were created!')  # noqa: E501
             if objectHandle._disposed:
                 raise ElementHandleError('JSHandle is disposed!')
             if objectHandle._remoteObject.get('unserializableValue'):
-                return {'unserializableValue': objectHandle._remoteObject.get('unserializableValue')}  # noqa: E501
+                return {'unserializableValue': objectHandle._remoteObject.get(
+                    'unserializableValue')}  # noqa: E501
             if not objectHandle._remoteObject.get('objectId'):
                 return {'value': objectHandle._remoteObject.get('value')}
             return {'objectId': objectHandle._remoteObject.get('objectId')}

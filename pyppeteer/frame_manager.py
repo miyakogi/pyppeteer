@@ -14,14 +14,14 @@ from pyee import AsyncIOEventEmitter
 
 from pyppeteer import helper
 from pyppeteer.connection import CDPSession
-from pyppeteer.network_manager import NetworkManager
-from pyppeteer.element_handle import ElementHandle
+from pyppeteer.network_manager import NetworkManager, EVALUATION_SCRIPT_URL
 from pyppeteer.errors import NetworkError
 from pyppeteer.execution_context import ExecutionContext
 from pyppeteer.jshandle import JSHandle, ElementHandle, createJSHandle
 from pyppeteer.errors import ElementHandleError, PageError, TimeoutError
 from pyppeteer.util import merge_dict
 
+UTILITY_WORLD_NAME = '__pyppeteer_utility_world__'
 if TYPE_CHECKING:
     from typing import Set  # noqa: F401
 
@@ -39,15 +39,17 @@ class FrameManager(AsyncIOEventEmitter):
         FrameNavigatedWithinDocument='framenavigatedwithindocument',
     )
 
-    def __init__(self, client: CDPSession, frameTree: Dict, page: Any) -> None:
+    def __init__(self, client: CDPSession, page: Any,
+                 ignoreHTTPSErrors) -> None:
         """Make new frame manager."""
         super().__init__()
         self._client = client
         self._page = page
-        self._networkmanager = NetworkManager(client, self)
+        self._networkmanager = NetworkManager(client, self, ignoreHTTPSErrors)
         self._frames: OrderedDict[str, Frame] = OrderedDict()
         self._mainFrame: Optional[Frame] = None
         self._contextIdToContext: Dict[str, ExecutionContext] = dict()
+        self._isolatedWorlds = set()
 
         client.on('Page.frameAttached',
                   lambda event: self._onFrameAttached(
@@ -76,7 +78,39 @@ class FrameManager(AsyncIOEventEmitter):
         client.on('Page.lifecycleEvent',
                   lambda event: self._onLifecycleEvent(event))
 
+    async def initialize(self):
+        _, FrameTree = await asyncio.gather(
+            self._client.send('Page.enable'),
+            self._client.send('Page.getFrameTree')
+        )
+        frameTree = FrameTree['frameTree']
         self._handleFrameTree(frameTree)
+
+        runtime = asyncio.ensure_future(self._client.send('Runtime.enable'))
+        runtime.add_done_callback(
+            lambda x: self._client._loop.create_task(
+                self._ensureIsolatedWorld(UTILITY_WORLD_NAME))
+        )
+        await asyncio.gather(
+            self._client.send('Page.setLifecycleEventsEnabled',
+                              {"enabled": True}),
+            runtime, self._networkmanager.initialize()
+        )
+
+    async def _ensureIsolatedWorld(self, name: str):
+        if name in self._isolatedWorlds:
+            return
+        self._isolatedWorlds.add(name)
+        await self._client.send('Page.addScriptToEvaluateOnNewDocument', {
+            "source": f'//# sourceURL={EVALUATION_SCRIPT_URL}',
+            "worldName": name
+        })
+        await asyncio.gather(
+            *map(lambda frame: self._client.send('Page.createIsolatedWorld', {
+                "frameId": frame._id, "grantUniveralAccess": True,
+                "worldName": name
+            }), self.frames())
+        )
 
     def _onLifecycleEvent(self, event: Dict) -> None:
         frame = self._frames.get(event['frameId'])
@@ -122,7 +156,7 @@ class FrameManager(AsyncIOEventEmitter):
         if frameId in self._frames:
             return
         parentFrame = self._frames.get(parentFrameId)
-        frame = Frame(self._client, parentFrame, frameId)
+        frame = Frame(self, self._client, parentFrame, frameId)
         self._frames[frameId] = frame
         self.emit(FrameManager.Events.FrameAttached, frame)
 
@@ -150,7 +184,7 @@ class FrameManager(AsyncIOEventEmitter):
                 frame._id = _id
             else:
                 # Initial main frame navigation.
-                frame = Frame(self._client, None, _id)
+                frame = Frame(self, self._client, None, _id)
             self._frames[_id] = frame
             self._mainFrame = frame
 
@@ -183,7 +217,6 @@ class FrameManager(AsyncIOEventEmitter):
         context = ExecutionContext(
             self._client,
             contextPayload,
-            lambda obj: self.createJSHandle(contextPayload['id'], obj),
             frame,
         )
         self._contextIdToContext[contextPayload['id']] = context
@@ -216,10 +249,7 @@ class FrameManager(AsyncIOEventEmitter):
         context = self._contextIdToContext.get(contextId)
         if not context:
             raise ElementHandleError(f'missing context with id = {contextId}')
-        if remoteObject.get('subtype') == 'node':
-            return ElementHandle(context, self._client, remoteObject,
-                                 self._page, self)
-        return JSHandle(context, self._client, remoteObject)
+        return createJSHandle(context, remoteObject)
 
     def _removeFramesRecursively(self, frame: 'Frame') -> None:
         for child in frame.childFrames:
@@ -239,8 +269,10 @@ class Frame(object):
     Frame objects can be obtained via :attr:`pyppeteer.page.Page.mainFrame`.
     """
 
-    def __init__(self, client: CDPSession, parentFrame: Optional['Frame'],
+    def __init__(self, frameManager: FrameManager, client: CDPSession,
+                 parentFrame: Optional['Frame'],
                  frameId: str) -> None:
+        self._frameManager = frameManager
         self._client = client
         self._parentFrame = parentFrame
         self._url = ''
@@ -311,16 +343,13 @@ class Frame(object):
         return value
 
     async def _document(self) -> ElementHandle:
-        if self._documentPromise:
-            return self._documentPromise
-        context = await self.executionContext()
-        if context is None:
-            raise PageError('No context exists.')
-        document = (await context.evaluateHandle('document')).asElement()
-        self._documentPromise = document
-        if document is None:
-            raise PageError('Could not find `document`.')
-        return document
+        if not self._documentPromise:
+            context = await self.executionContext()
+            if context is None:
+                raise PageError('No context exists.')
+            self._documentPromise = (
+                await context.evaluateHandle('document')).asElement()
+        return self._documentPromise
 
     async def xpath(self, expression: str) -> List[ElementHandle]:
         """Evaluate the XPath expression.

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """Coverage module."""
-
+import asyncio
 from functools import cmp_to_key
 import logging
 from typing import Any, Dict, List
@@ -141,7 +141,8 @@ class JSCoverage(object):
             raise PageError('JSCoverage is always enabled.')
         self._resetOnNavigation = (True if 'resetOnNavigation' not in options
                                    else bool(options['resetOnNavigation']))
-        self._reportAnonymousScript = bool(options.get('reportAnonymousScript'))  # noqa: E501
+        self._reportAnonymousScript = bool(
+            options.get('reportAnonymousScript'))  # noqa: E501
         self._enabled = True
         self._scriptURLs.clear()
         self._scriptSources.clear()
@@ -154,11 +155,13 @@ class JSCoverage(object):
                 self._client, 'Runtime.executionContextsCleared',
                 self._onExecutionContextsCleared),
         ]
-        await self._client.send('Profiler.enable')
-        await self._client.send('Profiler.startPreciseCoverage',
-                                {'callCount': False, 'detailed': True})
-        await self._client.send('Debugger.enable')
-        await self._client.send('Debugger.setSkipAllPauses', {'skip': True})
+        await asyncio.gather(
+            self._client.send('Profiler.enable'),
+            self._client.send('Profiler.startPreciseCoverage',
+                              {'callCount': False, 'detailed': True}),
+            self._client.send('Debugger.enable'),
+            self._client.send('Debugger.setSkipAllPauses', {'skip': True})
+        )
 
     def _onExecutionContextsCleared(self, event: Dict) -> None:
         if not self._resetOnNavigation:
@@ -205,6 +208,8 @@ class JSCoverage(object):
         coverage: List = []
         for entry in result.get('result', []):
             url = self._scriptURLs.get(entry.get('scriptId'))
+            if not url and self._reportAnonymousScript:
+                url = f'debugger://VM{entry.get("scriptId")}'
             text = self._scriptSources.get(entry.get('scriptId'))
             if text is None or url is None:
                 continue

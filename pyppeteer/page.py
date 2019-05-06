@@ -48,7 +48,7 @@ class Page(AsyncIOEventEmitter):
 
     The :class:`Page` class emits various :attr:`~Page.Events` which can be
     handled by using ``on`` or ``once`` method, which is inherited from
-    `pyee <https://pyee.readthedocs.io/en/latest/>`_'s ``EventEmitter`` class.
+    `pyee <https://pyee.readthedocs.io/en/latest/>`_'s ``AsyncIOEventEmitter`` class.
     """
 
     #: Available events.
@@ -87,34 +87,26 @@ class Page(AsyncIOEventEmitter):
 
     @staticmethod
     async def create(client: CDPSession, target: 'Target',
-                     ignoreHTTPSErrors: bool, setDefaultViewport: bool,
+                     ignoreHTTPSErrors: bool,
+                     setDefaultViewport: bool,
                      screenshotTaskQueue: list = None) -> 'Page':
         """Async function which makes new page object."""
-        await client.send('Page.enable'),
-        frameTree = (await client.send('Page.getFrameTree'))['frameTree']
-        page = Page(client, target, frameTree, ignoreHTTPSErrors,
-                    screenshotTaskQueue)
+        page = Page(client, target, ignoreHTTPSErrors, screenshotTaskQueue)
 
         await asyncio.gather(
+            page._frameManager.initialize(),
             client.send('Target.setAutoAttach',
-                        {'autoAttach': True, 'waitForDebuggerOnStart': False}),
-            # noqa: E501
-            client.send('Page.setLifecycleEventsEnabled', {'enabled': True}),
-            client.send('Network.enable', {}),
-            client.send('Runtime.enable', {}),
-            client.send('Security.enable', {}),
+                        {'autoAttach': True, 'waitForDebuggerOnStart': False,
+                         'flatten': True}),
             client.send('Performance.enable', {}),
             client.send('Log.enable', {}),
         )
-        if ignoreHTTPSErrors:
-            await client.send('Security.setOverrideCertificateErrors',
-                              {'override': True})
         if setDefaultViewport:
             await page.setViewport({'width': 800, 'height': 600})
         return page
 
     def __init__(self, client: CDPSession, target: 'Target',  # noqa: C901
-                 frameTree: Dict, ignoreHTTPSErrors: bool,
+                 ignoreHTTPSErrors: bool,
                  screenshotTaskQueue: list = None) -> None:
         super().__init__()
         self._closed = False
@@ -123,7 +115,7 @@ class Page(AsyncIOEventEmitter):
         self._keyboard = Keyboard(client)
         self._mouse = Mouse(client, self._keyboard)
         self._touchscreen = Touchscreen(client, self._keyboard)
-        self._frameManager = FrameManager(client, frameTree, self)
+        self._frameManager = FrameManager(client, self, ignoreHTTPSErrors)
         self._networkManager = self._frameManager.NetworkManager
         self._emulationManager = EmulationManager(client)
         self._tracing = Tracing(client)
@@ -151,7 +143,7 @@ class Page(AsyncIOEventEmitter):
                     debugError(logger, e)
                 return
             sessionId = event['sessionId']
-            session = client._createSession(targetInfo['type'], sessionId)
+            session = client._connection.session(sessionId)
             worker = Worker(
                 session,
                 targetInfo['url'],
@@ -712,7 +704,7 @@ function addPageBinding(bindingName) {
         values: List[JSHandle] = []
         for arg in event.get('args', []):
             values.append(self._frameManager.createJSHandle(_id, arg))
-        self._addConsoleMessage(event['type'], values)
+        self._addConsoleMessage(event['type'], values, event.get('stackTrace'))
 
     def _onBindingCalled(self, event: Dict) -> None:
         obj = json.loads(event['payload'])
@@ -737,7 +729,8 @@ function addPageBinding(bindingName) {
         except Exception as e:
             helper.debugError(logger, e)
 
-    def _addConsoleMessage(self, type: str, args: List[JSHandle]) -> None:
+    def _addConsoleMessage(self, type: str, args: List[JSHandle],
+                           stackTrace) -> None:
         if not self.listeners(Page.Events.Console):
             for arg in args:
                 self._client._loop.create_task(arg.dispose())
@@ -751,8 +744,13 @@ function addPageBinding(bindingName) {
             else:
                 textTokens.append(
                     str(helper.valueFromRemoteObject(remoteObject)))
+        callFrames = stackTrace.get("callFrames", [])
+        location = {"url": callFrames[0].get("url"),
+                    "lineNumber": callFrames[0].get("lineNumber"),
+                    "columnNumber": callFrames[0].get("columnNumber")
+                    } if stackTrace and callFrames else {}
 
-        message = ConsoleMessage(type, ' '.join(textTokens), args)
+        message = ConsoleMessage(type, ' '.join(textTokens), args, location)
         self.emit(Page.Events.Console, message)
 
     def _onDialog(self, event: Any) -> None:
@@ -880,7 +878,8 @@ function addPageBinding(bindingName) {
             nonlocal ensureNewDocumentNavigation
             response = await self._client.send(
                 'Page.navigate',
-                {'url': url, 'referrer': referrer, "frameId": frame._id})
+                {'url': url, "frameId": frame._id, 'referrer': referrer
+                 })
             ensureNewDocumentNavigation = bool(response.get("loaderId"))
             if response.get('errorText'):
                 return f'{response["errorText"]} at {url}'
@@ -916,11 +915,10 @@ function addPageBinding(bindingName) {
                      else watcher.sameDocumentNavigationPromise),
                     self._pageCrashed
                 }, return_when=concurrent.futures.FIRST_COMPLETED)
-                if watcher.timeoutOrTerminationPromise in done:
-                    pending.pop().cancel()
-                    error = done.pop().exception()
+                error = done.pop().exception()
+                [task.cancel() for task in pending]
         else:
-            pending.pop().cancel()
+            [task.cancel() for task in pending]
             error = done.pop().exception()
         watcher.dispose()
         if error:
@@ -1798,14 +1796,15 @@ class ConsoleMessage(object):
     ConsoleMessage objects are dispatched by page via the ``console`` event.
     """
 
-    def __init__(self, type: str, text: str, args: List[JSHandle] = None
-                 ) -> None:
+    def __init__(self, type: str, text: str, args: List[JSHandle] = None,
+                 location=None) -> None:
         #: (str) type of console message
         self._type = type
         #: (str) console message string
         self._text = text
         #: list of JSHandle
         self._args = args if args is not None else []
+        self._location = location
 
     @property
     def type(self) -> str:
@@ -1821,6 +1820,10 @@ class ConsoleMessage(object):
     def args(self) -> List[JSHandle]:
         """Return list of args (JSHandle) of this message."""
         return self._args
+
+    @property
+    def location(self):
+        return self._location
 
 
 async def craete(*args: Any, **kwargs: Any) -> Page:

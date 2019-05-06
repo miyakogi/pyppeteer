@@ -4,6 +4,7 @@
 """Worker module."""
 
 import logging
+import functools
 from typing import Any, Callable, Dict, List, TYPE_CHECKING
 
 from pyee import AsyncIOEventEmitter
@@ -29,7 +30,7 @@ class Worker(AsyncIOEventEmitter):
     """  # noqa: E501
 
     def __init__(self, client: 'CDPSession', url: str,  # noqa: C901
-                 consoleAPICalled: Callable[[str, List[JSHandle]], None],
+                 consoleAPICalled: Callable[[str, List[JSHandle], str], None],
                  exceptionThrown: Callable[[Dict], None]
                  ) -> None:
         super().__init__()
@@ -37,22 +38,19 @@ class Worker(AsyncIOEventEmitter):
         self._url = url
         self._loop = client._loop
         self._executionContextPromise = self._loop.create_future()
-
-        def jsHandleFactory(remoteObject: Dict) -> JSHandle:
-            return None  # type: ignore
+        jsHandleFactory = lambda remoteObject: remoteObject
 
         def onExecutionContentCreated(event: Dict) -> None:
             nonlocal jsHandleFactory
-
-            def jsHandleFactory(remoteObject: Dict) -> JSHandle:
-                return JSHandle(executionContext, client, remoteObject)
-
-            executionContext = ExecutionContext(
-                client, event['context'], jsHandleFactory)
-            self._executionContextCallback(executionContext)
+            executionContext = ExecutionContext(client, event['context'], None)
+            jsHandleFactory = functools.partial(JSHandle,
+                                                context=executionContext,
+                                                client=client)
+            self._executionContextPromise.set_result(executionContext)
 
         self._client.on('Runtime.executionContextCreated',
                         onExecutionContentCreated)
+
         try:
             # This might fail if the target is closed before we receive all
             # execution contexts.
@@ -61,19 +59,15 @@ class Worker(AsyncIOEventEmitter):
             debugError(logger, e)
 
         def onConsoleAPICalled(event: Dict) -> None:
-            args: List[JSHandle] = []
-            for arg in event.get('args', []):
-                args.append(jsHandleFactory(arg))
-            consoleAPICalled(event['type'], args)
+            consoleAPICalled(event['type'], list(
+                map(lambda x: jsHandleFactory(remoteObject=x),
+                    event.get('args', []))), event.get('stackTrace'))
 
         self._client.on('Runtime.consoleAPICalled', onConsoleAPICalled)
         self._client.on(
             'Runtime.exceptionThrown',
             lambda exception: exceptionThrown(exception['exceptionDetails']),
         )
-
-    def _executionContextCallback(self, value: ExecutionContext) -> None:
-        self._executionContextPromise.set_result(value)
 
     @property
     def url(self) -> str:
