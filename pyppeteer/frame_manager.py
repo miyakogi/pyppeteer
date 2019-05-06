@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Dict, Generator, List, Optional, Union
 from typing import TYPE_CHECKING
 
-from pyee import EventEmitter
+from pyee import AsyncIOEventEmitter
 
 from pyppeteer import helper
 from pyppeteer.connection import CDPSession
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class FrameManager(EventEmitter):
+class FrameManager(AsyncIOEventEmitter):
     """FrameManager class."""
 
     Events = SimpleNamespace(

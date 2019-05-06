@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Awaitable, Dict, List, Optional, Union, TYPE_CHECKING
 from urllib.parse import unquote
 
-from pyee import EventEmitter
+from pyee import AsyncIOEventEmitter
 
 from pyppeteer.connection import CDPSession
 from pyppeteer.errors import NetworkError
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class NetworkManager(EventEmitter):
+class NetworkManager(AsyncIOEventEmitter):
     """NetworkManager class."""
 
     Events = SimpleNamespace(
