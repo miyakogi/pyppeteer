@@ -31,7 +31,6 @@ class TestLauncher(unittest.TestCase):
     def setUp(self):
         self.headless_options = [
             '--headless',
-            '--disable-gpu',
             '--hide-scrollbars',
             '--mute-audio',
         ]

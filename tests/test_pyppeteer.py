@@ -25,8 +25,8 @@ class TestPyppeteer(BaseTestCase):
 
     @sync
     async def test_get_facebook(self):
-        await self.page.goto('https://www.facebook.com/')
-        self.assertEqual(self.page.url, 'https://www.facebook.com/')
+        await self.page.goto('https://www.baidu.com/')
+        self.assertEqual(self.page.url, 'https://www.baidu.com/')
 
     @sync
     async def test_plain_text_depr(self):

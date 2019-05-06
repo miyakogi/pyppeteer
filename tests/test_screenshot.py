@@ -30,6 +30,7 @@ class TestScreenShot(TestCase):
     async def test_screenshot(self):
         page = await self.browser.newPage()
         await page.goto('about:blank')
+
         options = {'path': str(self.target_path)}
         self.assertFalse(self.target_path.exists())
         await page.screenshot(options)

@@ -76,7 +76,7 @@ class TestNetworkEvent(BaseTestCase):
         self.assertFalse(response.fromServiceWorker)
         self.assertTrue(response.request)
         self.assertTrue(response.securityDetails)
-        self.assertEqual(response.securityDetails.protocol, 'TLS 1.2')
+        self.assertEqual(response.securityDetails.protocol, 'TLS 1.3')
 
     @sync
     async def test_from_cache(self):
@@ -417,7 +417,7 @@ class TestRequestInterception(BaseTestCase):
         self.page.on('request',
                      lambda req: asyncio.ensure_future(request_check(req)))
         with self.assertRaises(PageError) as cm:
-            await self.page.goto('data:text/html,No way!')
+                await self.page.goto('https://www.google.com')
         self.assertIn('net::ERR_FAILED', cm.exception.args[0])
 
     @sync

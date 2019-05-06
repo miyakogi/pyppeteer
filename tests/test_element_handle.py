@@ -3,6 +3,7 @@
 
 import logging
 import sys
+import unittest
 
 from syncer import sync
 
@@ -148,7 +149,7 @@ class TestBoxModel(BaseTestCase):
     async def test_box_model_invisible(self):
         await self.page.setContent('<div style="display:none;">hi</div>')
         element = await self.page.J('div')
-        with self.assertLogs('pyppeteer.element_handle', logging.DEBUG):
+        with self.assertLogs('pyppeteer.jshandle', logging.DEBUG):
             self.assertIsNone(await element.boxModel())
 
     @sync
@@ -156,11 +157,11 @@ class TestBoxModel(BaseTestCase):
         await self.page.setContent('<div style="display:none;">hi</div>')
         element = await self.page.J('div')
         pyppeteer.DEBUG = True
-        with self.assertLogs('pyppeteer.element_handle', logging.ERROR):
+        with self.assertLogs('pyppeteer.jshandle', logging.ERROR):
             self.assertIsNone(await element.boxModel())
         pyppeteer.DEBUG = False
         with self.assertRaises(AssertionError):
-            with self.assertLogs('pyppeteer.element_handle', logging.INFO):
+            with self.assertLogs('pyppeteer.jshandle', logging.INFO):
                 self.assertIsNone(await element.boxModel())
 
 

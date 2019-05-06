@@ -10,6 +10,7 @@ import unittest
 from syncer import sync
 
 from pyppeteer import connect, launch
+from pyppeteer.errors import PageError
 
 from .base import BaseTestCase, DEFAULT_OPTIONS
 from .utils import waitEvent
@@ -117,11 +118,8 @@ class TestBrowser(unittest.TestCase):
         page = await browser.newPage()
         errors = []
         page.on('error', lambda e: errors.append(e))
-        asyncio.ensure_future(page.goto('chrome://crash'))
-        for i in range(100):
-            await asyncio.sleep(0.01)
-            if errors:
-                break
+        with self.assertRaises(PageError):
+            await page.goto('chrome://crash')
         await browser.close()
         self.assertTrue(errors)
 
