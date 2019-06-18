@@ -855,6 +855,11 @@ class WaitTask(object):
             raise result
         return result
 
+    def cancel(self) -> None:
+        """Cancel this task."""
+        self.promise.set_result(None)
+        self._cleanup()
+
     def terminate(self, error: Exception) -> None:
         """Terminate this task."""
         self._terminated = True
@@ -912,7 +917,9 @@ class WaitTask(object):
                 'Cannot find context with specified id' in error.args[0]):
             return
 
-        if error:
+        if self.promise.done():
+            return
+        elif error:
             self.promise.set_exception(error)
         else:
             self.promise.set_result(success)
