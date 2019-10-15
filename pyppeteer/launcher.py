@@ -408,6 +408,7 @@ def defaultArgs(options: Dict = None, **kwargs: Any) -> List[str]:  # noqa: C901
     options = merge_dict(options, kwargs)
     devtools = options.get('devtools', False)
     headless = options.get('headless', not devtools)
+    noSandbox = options.get('noSandbox', False)
     args = options.get('args', list())
     userDataDir = options.get('userDataDir')
     chromeArguments = copy(DEFAULT_ARGS)
@@ -424,6 +425,8 @@ def defaultArgs(options: Dict = None, **kwargs: Any) -> List[str]:  # noqa: C901
         ))
         if current_platform().startswith('win'):
             chromeArguments.append('--disable-gpu')
+    if noSandbox:
+        chromeArguments.append('--no-sandbox')
 
     if all(map(lambda arg: arg.startswith('-'), args)):  # type: ignore
         chromeArguments.append('about:blank')
