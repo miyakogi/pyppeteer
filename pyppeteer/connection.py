@@ -261,6 +261,14 @@ class CDPSession(EventEmitter):
                     result = obj.get('result')
                     if callback and not callback.done():
                         callback.set_result(result)
+        elif obj.get('error'):
+            for callback in self._callbacks.values():
+                callback.set_exception(_createProtocolError(
+                    callback.error,  # type: ignore
+                    callback.method,  # type: ignore
+                    obj,
+                ))
+            self._callbacks = {}
         else:
             params = obj.get('params', {})
             if obj.get('method') == 'Target.receivedMessageFromTarget':
