@@ -62,7 +62,7 @@ class NavigatorWatcher:
                 '`networkIdleInflight` option is no longer supported.')
         if options.get('waitUntil') == 'networkidle':
             raise ValueError(
-                '`networkidle` option is no logner supported. '
+                '`networkidle` option is no longer supported. '
                 'Use `networkidle2` instead.')
         if options.get('waitUntil') == 'documentloaded':
             import logging
