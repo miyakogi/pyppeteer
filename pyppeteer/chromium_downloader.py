@@ -34,17 +34,32 @@ if NO_PROGRESS_BAR.lower() in ('1', 'true'):
 downloadURLs = {
     'linux': f'{BASE_URL}/Linux_x64%2F{REVISION}%2Fchrome-linux.zip?alt=media',
     'mac': f'{BASE_URL}/Mac%2F{REVISION}%2Fchrome-mac.zip?alt=media',
-    'win32': f'{BASE_URL}/Win%2F{REVISION}%2Fchrome-win32.zip?alt=media',
-    'win64': f'{BASE_URL}/Win_x64%2F{REVISION}%2Fchrome-win32.zip?alt=media',
+    'win32': f'{BASE_URL}/Win%2F{REVISION}%2Fchrome-win.zip?alt=media',
+    'win64': f'{BASE_URL}/Win_x64%2F{REVISION}%2Fchrome-win.zip?alt=media',
+}
+
+chromedriverdownloadURLs = {
+    'linux': f'{BASE_URL}/Linux_x64%2F{REVISION}%2Fchromedriver_linux.zip?alt=media',
+    'mac': f'{BASE_URL}/Mac%2F{REVISION}%2Fchromedriver_mac64.zip?alt=media',
+    'win32': f'{BASE_URL}/Win%2F{REVISION}%2Fchromedriver_win.zip?alt=media',
+    'win64': f'{BASE_URL}/Win_x64%2F{REVISION}%2Fchromedriver_win.zip?alt=media',
 }
 
 chromiumExecutable = {
     'linux': DOWNLOADS_FOLDER / REVISION / 'chrome-linux' / 'chrome',
     'mac': (DOWNLOADS_FOLDER / REVISION / 'chrome-mac' / 'Chromium.app' /
             'Contents' / 'MacOS' / 'Chromium'),
-    'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
-    'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
+    'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win' / 'chrome.exe',
+    'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win' / 'chrome.exe',
 }
+
+chromedriverExecutable = {
+    'linux': DOWNLOADS_FOLDER / REVISION / 'chromedriver_linux' / 'chromedriver',
+    'mac': DOWNLOADS_FOLDER / REVISION / 'chromedriver_mac64' / 'chromedriver',
+    'win32': DOWNLOADS_FOLDER / REVISION / 'chromedriver_win32' / 'chromedriver.exe',
+    'win64': DOWNLOADS_FOLDER / REVISION / 'chromedriver_win32' / 'chromedriver.exe',
+}
+
 
 
 def current_platform() -> str:
