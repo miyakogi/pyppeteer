@@ -1,6 +1,11 @@
 Pyppeteer
 =========
 
+Pyppeteer has moved to [pyppeteer/pyppeteer](https://github.com/pyppeteer/pyppeteer)
+====================================================================================
+
+---
+
 [![PyPI](https://img.shields.io/pypi/v/pyppeteer.svg)](https://pypi.python.org/pypi/pyppeteer)
 [![PyPI version](https://img.shields.io/pypi/pyversions/pyppeteer.svg)](https://pypi.python.org/pypi/pyppeteer)
 [![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://miyakogi.github.io/pyppeteer)
