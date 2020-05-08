@@ -19,10 +19,10 @@ from pyppeteer import __chromium_revision__, __pyppeteer_home__
 logger = logging.getLogger(__name__)
 
 DOWNLOADS_FOLDER = Path(__pyppeteer_home__) / 'local-chromium'
-DEFAULT_DOWNLOAD_HOST = 'https://storage.googleapis.com'
+DEFAULT_DOWNLOAD_HOST = 'https://www.googleapis.com'
 DOWNLOAD_HOST = os.environ.get(
     'PYPPETEER_DOWNLOAD_HOST', DEFAULT_DOWNLOAD_HOST)
-BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
+BASE_URL = f'{DOWNLOAD_HOST}/download/storage/v1/b/chromium-browser-snapshots/o'
 
 REVISION = os.environ.get(
     'PYPPETEER_CHROMIUM_REVISION', __chromium_revision__)
@@ -32,19 +32,34 @@ if NO_PROGRESS_BAR.lower() in ('1', 'true'):
     NO_PROGRESS_BAR = True  # type: ignore
 
 downloadURLs = {
-    'linux': f'{BASE_URL}/Linux_x64/{REVISION}/chrome-linux.zip',
-    'mac': f'{BASE_URL}/Mac/{REVISION}/chrome-mac.zip',
-    'win32': f'{BASE_URL}/Win/{REVISION}/chrome-win32.zip',
-    'win64': f'{BASE_URL}/Win_x64/{REVISION}/chrome-win32.zip',
+    'linux': f'{BASE_URL}/Linux_x64%2F{REVISION}%2Fchrome-linux.zip?alt=media',
+    'mac': f'{BASE_URL}/Mac%2F{REVISION}%2Fchrome-mac.zip?alt=media',
+    'win32': f'{BASE_URL}/Win%2F{REVISION}%2Fchrome-win.zip?alt=media',
+    'win64': f'{BASE_URL}/Win_x64%2F{REVISION}%2Fchrome-win.zip?alt=media',
+}
+
+chromedriverdownloadURLs = {
+    'linux': f'{BASE_URL}/Linux_x64%2F{REVISION}%2Fchromedriver_linux.zip?alt=media',
+    'mac': f'{BASE_URL}/Mac%2F{REVISION}%2Fchromedriver_mac64.zip?alt=media',
+    'win32': f'{BASE_URL}/Win%2F{REVISION}%2Fchromedriver_win.zip?alt=media',
+    'win64': f'{BASE_URL}/Win_x64%2F{REVISION}%2Fchromedriver_win.zip?alt=media',
 }
 
 chromiumExecutable = {
     'linux': DOWNLOADS_FOLDER / REVISION / 'chrome-linux' / 'chrome',
     'mac': (DOWNLOADS_FOLDER / REVISION / 'chrome-mac' / 'Chromium.app' /
             'Contents' / 'MacOS' / 'Chromium'),
-    'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
-    'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win32' / 'chrome.exe',
+    'win32': DOWNLOADS_FOLDER / REVISION / 'chrome-win' / 'chrome.exe',
+    'win64': DOWNLOADS_FOLDER / REVISION / 'chrome-win' / 'chrome.exe',
 }
+
+chromedriverExecutable = {
+    'linux': DOWNLOADS_FOLDER / REVISION / 'chromedriver_linux' / 'chromedriver',
+    'mac': DOWNLOADS_FOLDER / REVISION / 'chromedriver_mac64' / 'chromedriver',
+    'win32': DOWNLOADS_FOLDER / REVISION / 'chromedriver_win32' / 'chromedriver.exe',
+    'win64': DOWNLOADS_FOLDER / REVISION / 'chromedriver_win32' / 'chromedriver.exe',
+}
+
 
 
 def current_platform() -> str:
