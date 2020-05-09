@@ -22,6 +22,7 @@ from pyppeteer.dialog import Dialog
 from pyppeteer.element_handle import ElementHandle
 from pyppeteer.emulation_manager import EmulationManager
 from pyppeteer.errors import PageError
+from pyppeteer.errors import TimeoutError as pyTimeoutError
 from pyppeteer.execution_context import JSHandle  # noqa: F401
 from pyppeteer.frame_manager import Frame  # noqa: F401
 from pyppeteer.frame_manager import FrameManager
@@ -491,7 +492,7 @@ class Page(EventEmitter):
         * ``sameSite`` (str): ``'Strict'`` or ``'Lax'``
         """
         if not urls:
-            urls = (self.url, )
+            urls = (self.url,)
         resp = await self._client.send('Network.getCookies', {
             'urls': urls,
         })
@@ -846,7 +847,7 @@ function addPageBinding(bindingName) {
         * then main resource failed to load
 
         .. note::
-            :meth:`goto` either raise error or return a main resource response.
+            :meth:`goto` return a main resource response.
             The only exceptions are navigation to ``about:blank`` or navigation
             to the same URL with a different hash, which would succeed and
             return ``None``.
@@ -877,14 +878,15 @@ function addPageBinding(bindingName) {
                                    options)
 
         result = await self._navigate(url, referrer)
-        if result is not None:
+        if not result is None:
             raise PageError(result)
         result = await watcher.navigationPromise()
         watcher.cancel()
         helper.removeEventListeners(eventListeners)
         error = result[0].pop().exception()  # type: ignore
         if error:
-            raise error
+            if not isinstance(error, pyTimeoutError):
+                raise error
 
         request = requests.get(mainFrame._navigationURL)
         return request.response if request else None
@@ -894,6 +896,8 @@ function addPageBinding(bindingName) {
             'Page.navigate', {'url': url, 'referrer': referrer})
         if response.get('errorText'):
             return f'{response["errorText"]} at {url}'
+        if response.get('error_text'):
+            return f'{response["error_text"]} at {url}'
         return None
 
     async def reload(self, options: dict = None, **kwargs: Any
@@ -1731,7 +1735,6 @@ supportedMetrics = (
     'JSHeapUsedSize',
     'JSHeapTotalSize',
 )
-
 
 unitToPixels = {
     'px': 1,
