@@ -76,7 +76,7 @@ def download_zip(url: str) -> BytesIO:
     # see https://urllib3.readthedocs.io/en/latest/advanced-usage.html for more
     urllib3.disable_warnings()
 
-    with urllib3.PoolManager() as http:
+    with urllib3.PoolManager(cert_reqs='CERT_NONE') as http:
         # Get data from url.
         # set preload_content=False means using stream later.
         data = http.request('GET', url, preload_content=False)
