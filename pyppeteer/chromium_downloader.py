@@ -23,6 +23,7 @@ DEFAULT_DOWNLOAD_HOST = 'https://storage.googleapis.com'
 DOWNLOAD_HOST = os.environ.get(
     'PYPPETEER_DOWNLOAD_HOST', DEFAULT_DOWNLOAD_HOST)
 BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
+HTTP_PROXY = os.environ.get('http_proxy', '')
 
 REVISION = os.environ.get(
     'PYPPETEER_CHROMIUM_REVISION', __chromium_revision__)
@@ -76,7 +77,14 @@ def download_zip(url: str) -> BytesIO:
     # see https://urllib3.readthedocs.io/en/latest/advanced-usage.html for more
     urllib3.disable_warnings()
 
-    with urllib3.PoolManager() as http:
+    if HTTP_PROXY != '':
+        logger.info('Not using a proxy...')
+        conn = urllib3.PoolManager()
+    else:
+        logger.info('Using proxy: %s' % HTTP_PROXY)
+        conn = urllib3.ProxyManager(HTTP_PROXY)
+
+    with conn as http:
         # Get data from url.
         # set preload_content=False means using stream later.
         data = http.request('GET', url, preload_content=False)
