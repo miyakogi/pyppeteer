@@ -156,7 +156,10 @@ class Launcher(object):
 
         def _close_process(*args: Any, **kwargs: Any) -> None:
             if not self.chromeClosed:
-                self._loop.run_until_complete(self.killChrome())
+                try:
+                    self._loop.run_until_complete(self.killChrome())
+                except RuntimeError:
+                    raise Exception("don't forget to close browser process")
 
         # don't forget to close browser process
         if self.autoClose:
