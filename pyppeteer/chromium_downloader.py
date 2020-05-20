@@ -27,6 +27,9 @@ BASE_URL = f'{DOWNLOAD_HOST}/chromium-browser-snapshots'
 REVISION = os.environ.get(
     'PYPPETEER_CHROMIUM_REVISION', __chromium_revision__)
 
+HTTP_PROXY = os.environ.get('HTTP_PROXY', '')
+HTTPS_PROXY = os.environ.get('HTTPS_PROXY', HTTP_PROXY)
+
 NO_PROGRESS_BAR = os.environ.get('PYPPETEER_NO_PROGRESS_BAR', '')
 if NO_PROGRESS_BAR.lower() in ('1', 'true'):
     NO_PROGRESS_BAR = True  # type: ignore
@@ -76,27 +79,32 @@ def download_zip(url: str) -> BytesIO:
     # see https://urllib3.readthedocs.io/en/latest/advanced-usage.html for more
     urllib3.disable_warnings()
 
-    with urllib3.PoolManager() as http:
-        # Get data from url.
-        # set preload_content=False means using stream later.
-        data = http.request('GET', url, preload_content=False)
+    if HTTPS_PROXY:
+        logger.warning(f'Using proxy: {HTTPS_PROXY}')
+        http = urllib3.ProxyManager(HTTPS_PROXY)
+    else:
+        http = urllib3.PoolManager()
 
-        try:
-            total_length = int(data.headers['content-length'])
-        except (KeyError, ValueError, AttributeError):
-            total_length = 0
+    # Get data from url.
+    # set preload_content=False means using stream later.
+    data = http.request('GET', url, preload_content=False)
 
-        process_bar = tqdm(
-            total=total_length,
-            file=os.devnull if NO_PROGRESS_BAR else None,
-        )
+    try:
+        total_length = int(data.headers['content-length'])
+    except (KeyError, ValueError, AttributeError):
+        total_length = 0
 
-        # 10 * 1024
-        _data = BytesIO()
-        for chunk in data.stream(10240):
-            _data.write(chunk)
-            process_bar.update(len(chunk))
-        process_bar.close()
+    process_bar = tqdm(
+        total=total_length,
+        file=os.devnull if NO_PROGRESS_BAR else None,
+    )
+
+    # 10 * 1024
+    _data = BytesIO()
+    for chunk in data.stream(10240):
+        _data.write(chunk)
+        process_bar.update(len(chunk))
+    process_bar.close()
 
     logger.warning('\nchromium download done.')
     return _data
