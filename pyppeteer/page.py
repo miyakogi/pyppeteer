@@ -1259,7 +1259,8 @@ function addPageBinding(bindingName) {
         await self._client.send('Target.activateTarget', {
             'targetId': self._target._targetId,
         })
-        clip = options.get('clip')
+
+        clip, quality = options.get('clip'), options.get('quality')
         if clip:
             clip['scale'] = 1
 
@@ -1299,6 +1300,9 @@ function addPageBinding(bindingName) {
         opt = {'format': format}
         if clip:
             opt['clip'] = clip
+        if format == 'jpeg' and quality is not None:
+            opt['quality'] = quality
+            
         result = await self._client.send('Page.captureScreenshot', opt)
 
         if options.get('omitBackground'):
